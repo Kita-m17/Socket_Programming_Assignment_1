@@ -20,18 +20,15 @@ def get_file():
 
 def send_heartbeat(peerSocket, tracker_ip, tracker_port):
     """Sends a periodic heartbeat/notification to the tracker to indicate that the peer is still active"""
-    while True:
-        peer_info = {
-            "type": "HEARTBEAT",
-            "peer_address": peerSocket.getsockname()
+    peer_info = {
+        "type": "HEARTBEAT",
+        "peer_address": peerSocket.getsockname()
         }
-        try:
-            peerSocket.sendto(json.dumps(peer_info).encode(), (tracker_ip, tracker_port))
-            print("Sent heartbeat to tracker.")
-        except:
-            print("Failed to send heartbeat. Exiting...")
-            break
-        time.sleep(60) # Send every 60 seconds
+    try:
+        peerSocket.sendto(json.dumps(peer_info).encode(), (tracker_ip, tracker_port))
+        print("Sent heartbeat to tracker.")
+    except:
+        print("Failed to send heartbeat. Exiting...")
 
 def check_files(shared_folder):
     #get the file sizes
@@ -76,13 +73,15 @@ def reg_peer(peerSocket,  tracker_port, tracker_ip):
     print(f"Files in {shared_folder}:", os.listdir(shared_folder))
 
     file_chunks = check_files(shared_folder)
-    
+    #add socket info of peer
     # Peer info message
+    listenSocketPort = startListening()
     peer_info = {
         "type": "REGISTER",
         "peer_address": peerSocket.getsockname(),
         "files": file_chunks, # Stores file names and their chunks
-        "metadata": chunkSave.get_file_metadata(512000, shared_folder)
+        "metadata": chunkSave.get_file_metadata(512000, shared_folder),
+        "listening_socket_port": listenSocketPort
     }
 
     #convert to json and send to tracker
@@ -109,17 +108,56 @@ def request_files(peerSocket, file):
     peerSocket.sendto(file_request.encode(), (trackerIP, trackerPort))
 
     # Receive list of peers with the file
-    data, _ = peerSocket.recvfrom(1024)
+    response, _ = peerSocket.recvfrom(1024)
 
-    if(data.decode() == 'No peers with file'):
-        print('No peers with file')
+    try:
+      data = json.loads(response.decode())  
 
-    else:
-        peer_list = data.decode().split(", ")
+      if "error" in data:
+           print(f"Tracker error: {data['error']}")
+           return None
+      
+      print(data)
+      return data
+    
+    except json.JSONDecodeError:
+        print(f"Error parsing response: {response.decode()}")
+        return None
+    
+def download_file(file_data, socket):
+    """Establishes TCP connection with Peer to download file chunks"""
+    filename = file_data['filename']
+    chunks_per_perr = file_data['total_chunks']
+    received_chunks = {} #store received chunks
 
-        # Assume the peer now requests and downloads the chunks from other peers
-        # Code for chunk downloading and assembly would go here...
-        print(f"Available peers for {file}: {peer_list}")
+    for peer_key, peer_info in file_data['peers'].items():
+        ip = peer_info['ip']
+        port = peer_info['port']
+        chunks_to_request = peer_info['chunks']
+
+        try:
+            TCPsocket = socket(socket.AF_INET, SOCK_STREAM)
+            TCPsocket.connect(ip, port)
+
+            print(f"Connected to {ip}, at port number {port}")
+            #request all chunks this peer has
+
+
+
+def startListening():
+    listenSocket = socket(socket.AF_INET, SOCK_STREAM)
+    listenSocket.bind(('12600', tcp_port))
+    tcp_port = listenSocket.getsockname()[1]
+    listenSocket.listen(1)
+
+    listener_thread = threading.Thread(target=accept_connections, daemon=True)
+    listener_thread.start()
+
+    print(f"Socket at port {tcp_port} is now listening")
+    #possibly return the port and ip (getsockname)
+    return tcp_port
+
+def accept_connections():
 
 def reseed(peerSocket, shared_folder, tracker_ip, tracker_port):
     file_chunks = check_files(shared_folder)
