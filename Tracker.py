@@ -7,6 +7,7 @@ away_threshold = 120
 peers = []
 peer_states = {} #stores peer states: {peer_address: {'state': 'registered', 'last_active' = time_stamp}}
 peer_database = {}  # Store peers and their files: {file_name: {chunk:[ip, port]}}
+file_metadata = {} #stores the metadata of each file that the peers have
 
 def handle_peer_requests(data, addr, server):
     request = json.loads(data.decode()) #convert json string to dict
@@ -17,7 +18,7 @@ def handle_peer_requests(data, addr, server):
     elif request["type"] == "REQUEST":
         peer_file_request(request, addr, server)
 
-    elif request["type"] == "UPDATE":
+    elif request["type"] == "RESEED":
         update_peer_chunks(request, addr, server)
 
     elif request["type"] == "EXIT":
@@ -25,6 +26,16 @@ def handle_peer_requests(data, addr, server):
 
     elif request["type"] == "HEARTBEAT":
         update_peer_activity(addr, server)
+
+
+def save_file_metadata(metadata):
+    for file_info in metadata:
+        file_name = file_info.get("filename")
+        if(file_name not in file_metadata):
+            file_metadata[file_name] = {
+                "size": file_info.get("size"),
+                "num_chunks": file_info.get("num_chunks")
+            }
 
 def remove_peer(request, addr, server, send_response=True):
     """Removes a peer and its shared chunks from the tracker database."""
@@ -45,14 +56,7 @@ def remove_peer(request, addr, server, send_response=True):
                 peer_list.remove(peer_address)
             if not peer_list:
                 chunks_to_remove.append(chunk)
-            # Remove peer from chunk list
-            #peer_database[file_name][file_chunk] = [peer for peer in peers if peer != peer_address]
             
-            #remove peers record of the file chunk from db
-            # if not peer_database[file_name][file_chunk]:
-            #     chunks_to_remove.append(file_chunk)
-        
-        
         #remove empty chunks
         for chunk in chunks_to_remove:
             del file_chunks[chunk]
@@ -93,35 +97,47 @@ def update_peer_chunks(request, addr, server):
         server.sendto(b"Chunk update received", addr)
 
 def peer_file_request(request, addr, server):
-    
-    filename = request.get("file_request","")
+    filename = request.get("file_request", "")
     requesting_peer_address = request["peer_address"]
 
     if not filename or filename not in peer_database:
-        server.sendto(b"No peers with file", addr)
+        server.sendto(json.dumps({"error": "No peers with file"}).encode(), addr)
         return
 
-    #get the chunk list if the file exists in the database
+    # Get the chunk list if the file exists in the database
     file_data = peer_database.get(filename, {})
 
-    # Create a copy of the data to modify before sending
-    filtered_file_data = {}
-    
-    # Filter out the requesting peer from the list of available peers
+    # Initialize the response with the new structure
+    response = {
+        "filename": filename,
+        "peers": {},
+        "total_chunks": len(file_data)
+    }
+
+    # Filter out the requesting peer and organize by IP:port
     for chunk_num, peers in file_data.items():
         # Only include peers that aren't the requesting peer
         filtered_peers = [peer for peer in peers if peer != requesting_peer_address]
-        if filtered_peers:  # Only include chunks that have available peers
-            filtered_file_data[chunk_num] = filtered_peers
+        
+        for peer in filtered_peers:
+            peer_key = f"{peer[0]}:{peer[1]}"  # Create a key using IP:port
+            
+            if peer_key not in response["peers"]:
+                response["peers"][peer_key] = {
+                    "ip": peer[0],
+                    "port": peer[1],
+                    "chunks": []
+                }
+            
+            response["peers"][peer_key]["chunks"].append(chunk_num)
     
     # Check if there are any peers left after filtering
-    if not filtered_file_data:
-        server.sendto(b'No other peers with file', addr)
+    if not response["peers"]:
+        server.sendto(json.dumps({"error": "No other peers with file"}).encode(), addr)
         return
     
-    # Convert dictionary to string before sending
-    server.sendto(str(filtered_file_data).encode(), addr)
-
+    # Send the JSON response
+    server.sendto(json.dumps(response).encode(), addr)
 
 def register_peer(request, addr, server):
     """Register peer and its chunks"""
@@ -147,6 +163,8 @@ def register_peer(request, addr, server):
                 peer_database[filename][chunk] = []
             if peer_address not in peer_database[filename][chunk]: #avoid duplicates
                 peer_database[filename][chunk].append(peer_address)
+    metadata = request.get("metadata")
+    save_file_metadata(metadata)
 
     peer_states[peer_address] = {
         "state": "connected",
@@ -159,7 +177,7 @@ def register_peer(request, addr, server):
 def check_peer_activity():
     """Periodically check if peers are still active"""
     while True:
-        time.sleep(40)
+        time.sleep(30)
         for peer_address, state_info in list(peer_states.items()):
             if time.time() - state_info['last_active'] > STATE_TIMEOUT:
                         peer_states[peer_address]['state'] = 'away'

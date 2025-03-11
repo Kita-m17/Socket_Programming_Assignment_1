@@ -25,10 +25,10 @@ def get_peer_file_chunks(shared_folder):
 
     return file_chunks
 
-def get_file_metadata(chunk_size):
+def get_file_metadata(chunk_size, path):
     """Returns metadata about files in the current directory, including their sizes, number of chunks, and hashes"""
     file_metadata = []
-    path = './'
+    #path = './'
     files = os.listdir(path)
     for file in files:
         file_path = os.path.join(path, file)
@@ -41,13 +41,13 @@ def get_file_metadata(chunk_size):
             num_chunks = file_size // chunk_size + (1 if file_size % chunk_size != 0 else 0)
 
             #compute the file hash
-            file_hash = hash_chunk(file_path)
+            #file_hash = hash_chunk(file_path)
             
             file_metadata.append(
                 { "Filename": file,
                  "size": file_size,
                  "num_chunks": num_chunks,
-                 "hash": file_hash
+                 #"hash": file_hash
                 })
     return file_metadata
             
@@ -58,9 +58,9 @@ def hash_chunk_with_data(data):
     sha256.update(data)
     return sha256.hexdigest()
 
-def get_files():
+def get_files(path = "./"):
     file_sizes = {}
-    path = './'
+    # path = './'
     file_dir = os.listdir(path)
     
     for file in file_dir:
@@ -82,9 +82,11 @@ def make_directory(filename):
     except PermissionError:
         print(f"Permission required to create {dir_path}")
 
-def split_chunks(filename, file_sizes):
+def split_chunks(shared_folder, filename, file_sizes):
     """Splits a file into 512KB chunks and saves them in a 'chunks' directory."""
-    file_path = f"./{filename}"
+    #file_path = f"./{filename}"
+    path = os.listdir(shared_folder)
+    file_path = os.path.join(shared_folder, filename)
     
     if filename not in file_sizes:
         print(f"File {filename} not found in file_sizes dictionary.")

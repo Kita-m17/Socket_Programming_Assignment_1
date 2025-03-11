@@ -8,7 +8,7 @@ import time
 import threading
 
 #tracker informartion
-trackerIP = '137.158.160.145'
+trackerIP = '196.24.164.174'
 trackerPort = 65135
 
 def get_file():
@@ -33,6 +33,34 @@ def send_heartbeat(peerSocket, tracker_ip, tracker_port):
             break
         time.sleep(60) # Send every 60 seconds
 
+def check_files(shared_folder):
+    #get the file sizes
+    file_sizes = chunkSave.get_files(os.path.join(shared_folder))
+    
+    for file in os.listdir(shared_folder):
+        file_path = os.path.join(shared_folder, file)
+
+        if not os.path.exists(file_path):
+            print(f"Error: File {file_path} not found.")
+            return
+        
+        if os.path.isdir(file_path):
+            print(f"Skipping directory: {file_path}")
+            continue
+        
+        # print(f"Processing file: {file} (Size: {file_sizes[file]} bytes)")
+
+        # # Generate file chunks
+        # chunkSave.split_chunks(file,  file_sizes)
+        if file in file_sizes:
+            print(f"Processing file: {file} (Size: {file_sizes[file]} bytes)")
+            # Generate file chunks
+            chunkSave.split_chunks(shared_folder, file, file_sizes)
+        else:
+            print(f"Warning: {file} not found in file_sizes dictionary.")
+
+    file_chunks = chunkSave.get_peer_file_chunks("./chunks")
+    return file_chunks
 
 def reg_peer(peerSocket,  tracker_port, tracker_ip):
     """
@@ -47,32 +75,14 @@ def reg_peer(peerSocket,  tracker_port, tracker_ip):
 
     print(f"Files in {shared_folder}:", os.listdir(shared_folder))
 
-    #get the file sizes
-    file_sizes = chunkSave.get_files()
-
-    for file in os.listdir(shared_folder):
-        file_path = os.path.join(shared_folder, file)
-
-        if not os.path.exists(file_path):
-            print(f"Error: File {file_path} not found.")
-            return
-        
-        if os.path.isdir(file_path):
-            print(f"Skipping directory: {file_path}")
-            continue
-        
-        print(f"Processing file: {file} (Size: {file_sizes[file]} bytes)")
-
-        # Generate file chunks
-        chunkSave.split_chunks(file,  file_sizes)
-
-    file_chunks = chunkSave.get_peer_file_chunks("./chunks")
+    file_chunks = check_files(shared_folder)
     
     # Peer info message
     peer_info = {
         "type": "REGISTER",
         "peer_address": peerSocket.getsockname(),
-        "files": file_chunks # Stores file names and their chunks
+        "files": file_chunks, # Stores file names and their chunks
+        "metadata": chunkSave.get_file_metadata(512000, shared_folder)
     }
 
     #convert to json and send to tracker
@@ -111,6 +121,20 @@ def request_files(peerSocket, file):
         # Code for chunk downloading and assembly would go here...
         print(f"Available peers for {file}: {peer_list}")
 
+def reseed(peerSocket, shared_folder, tracker_ip, tracker_port):
+    file_chunks = check_files(shared_folder)
+    
+    peer_address = peerSocket.getsockname()
+    
+    peer_info = {
+        "type": "RESEED",
+        "peer_address": peer_address,
+        "file_chunks": file_chunks
+    }
+
+    request = json.dumps(peer_info)
+    peerSocket.sendto(request.encode(), (tracker_ip, tracker_port))
+
 def exit(peerSocket):
     peer_info = { "type": "EXIT",
                 "peer_address": peerSocket.getsockname()
@@ -128,7 +152,7 @@ def main():
     #tracker informartion
     host = gethostbyname(gethostname())
     peerSocket = socket(AF_INET, SOCK_DGRAM)
-    peerSocket.bind((host,0))
+    peerSocket.bind((host,18))
     print("Peer script started!")
 
     Heading = "********************SEEDSTORM BitTorrent System********************" \
@@ -170,7 +194,7 @@ def main():
                 file_request = input("Enter the file/file chunk you're looking for: ")
                 request_files(peerSocket, file_request)
                 peerMssg = input("Enter a prompt: 1, 4: ")
-            send_heartbeat(peerSocket, trackerIP, trackerPort)
+            #send_heartbeat(peerSocket, trackerIP, trackerPort)
             time.sleep(1)
 
     except:
