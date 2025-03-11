@@ -8,6 +8,7 @@ peers = []
 peer_states = {} #stores peer states: {peer_address: {'state': 'registered', 'last_active' = time_stamp}}
 peer_database = {}  # Store peers and their files: {file_name: {chunk:[ip, port]}}
 file_metadata = {} #stores the metadata of each file that the peers have
+global peerListeningSocket
 
 def handle_peer_requests(data, addr, server):
     request = json.loads(data.decode()) #convert json string to dict
@@ -140,8 +141,10 @@ def peer_file_request(request, addr, server):
     server.sendto(json.dumps(response).encode(), addr)
 
 def register_peer(request, addr, server):
+    global listeningSocketPort
     """Register peer and its chunks"""
     peer_address = tuple(request.get("peer_address"))
+    listeningSocketPort = request.get("listening_socket")
     print(f"Debug: peer_address = {peer_address}, type = {type(peer_address)}")
     file_chunks = request.get("files", {})
     if not peer_address:
@@ -158,11 +161,13 @@ def register_peer(request, addr, server):
         if filename not in peer_database:
             peer_database[filename] = {}
 
+
         for chunk in chunk_list:
             if chunk not in peer_database[filename]:
                 peer_database[filename][chunk] = []
             if peer_address not in peer_database[filename][chunk]: #avoid duplicates
                 peer_database[filename][chunk].append(peer_address)
+            if 
     metadata = request.get("metadata")
     save_file_metadata(metadata)
 
