@@ -43,32 +43,33 @@ def remove_peer(request, addr, server, send_response=True):
     peer_address = tuple(request.get("peer_address"))
     print(f"Removing peer {peer_address} from database.")
 
-    if peer_database in peers:
+    if peer_address in peers:
         peers.remove(peer_address)
     peer_states.pop(peer_address, None)
 
     files_to_remove = []
-    #Iterate over all files in peer_database
+    # Iterate over all files in peer_database
     for file_name, file_chunks in list(peer_database.items()):
         chunks_to_remove = []
 
-        for file_chunk, peer_list in list(peer_database.items()):
-            if peer_address in peer_list:
-                peer_list.remove(peer_address)
+        for chunk, peer_list in list(file_chunks.items()):
+            # Remove peers that match the IP and UDP port (first two elements)
+            peer_list[:] = [p for p in peer_list if (p[0], p[1]) != peer_address]
+            
             if not peer_list:
                 chunks_to_remove.append(chunk)
             
-        #remove empty chunks
+        # Remove empty chunks
         for chunk in chunks_to_remove:
             del file_chunks[chunk]
         
-         # If no chunks remain, mark the file for removal
+        # If no chunks remain, mark the file for removal
         if not file_chunks:
             files_to_remove.append(file_name)
             
     # Delete empty files
     for file_name in files_to_remove:
-            del peer_database[file_name]
+        del peer_database[file_name]
 
     if peer_address in peer_states:
         del peer_states[peer_address]
@@ -99,7 +100,7 @@ def update_peer_chunks(request, addr, server):
 
 def peer_file_request(request, addr, server):
     filename = request.get("file_request", "")
-    requesting_peer_address = request["peer_address"]
+    requesting_peer_address = tuple(request["peer_address"])
 
     if not filename or filename not in peer_database:
         server.sendto(json.dumps({"error": "No peers with file"}).encode(), addr)
@@ -118,15 +119,16 @@ def peer_file_request(request, addr, server):
     # Filter out the requesting peer and organize by IP:port
     for chunk_num, peers in file_data.items():
         # Only include peers that aren't the requesting peer
-        filtered_peers = [peer for peer in peers if peer != requesting_peer_address]
+        filtered_peers = [peer for peer in peers if (peer[0], peer[1]) != requesting_peer_address]
         
         for peer in filtered_peers:
-            peer_key = f"{peer[0]}:{peer[1]}"  # Create a key using IP:port
+            # peer is now (ip, udp_port, tcp_port)
+            peer_key = f"{peer[0]}:{peer[1]}"  # Create a key using IP:UDP_port
             
             if peer_key not in response["peers"]:
                 response["peers"][peer_key] = {
                     "ip": peer[0],
-                    "port": peer[1],
+                    "port": peer[2],  # Use the TCP port for file transfers
                     "chunks": []
                 }
             
@@ -141,39 +143,52 @@ def peer_file_request(request, addr, server):
     server.sendto(json.dumps(response).encode(), addr)
 
 def register_peer(request, addr, server):
-    global listeningSocketPort
     """Register peer and its chunks"""
     peer_address = tuple(request.get("peer_address"))
-    listeningSocketPort = request.get("listening_socket")
-    print(f"Debug: peer_address = {peer_address}, type = {type(peer_address)}")
+    listening_socket_port = request.get("listening_socket_port")  # Get the TCP port number from request
+    print(f"Debug: peer_address = {peer_address}, listening port = {listening_socket_port}, type = {type(peer_address)}")
     file_chunks = request.get("files", {})
+    
     if not peer_address:
         print("Error: Missing peer_address in request.")
         server.sendto(b"Error: Missing peer_address", addr)
         return
     
+    # Store the TCP port with the peer data
+    peer_info = {
+        "address": peer_address,
+        "tcp_port": listening_socket_port,
+        "last_active": time.time()
+    }
+    
     if peer_address in peers:
         print(f"Peer {peer_address} re-registering. Removing old data.")
         remove_peer({"peer_address": peer_address}, addr, server, send_response=False)
+    
     peers.append(peer_address)
 
     for filename, chunk_list in file_chunks.items():
         if filename not in peer_database:
             peer_database[filename] = {}
 
-
         for chunk in chunk_list:
             if chunk not in peer_database[filename]:
                 peer_database[filename][chunk] = []
-            if peer_address not in peer_database[filename][chunk]: #avoid duplicates
-                peer_database[filename][chunk].append(peer_address)
-            if 
+            
+            # Store the full peer information including TCP port
+            # Change this to store a tuple containing both address and port
+            peer_with_port = (peer_address[0], peer_address[1], listening_socket_port)
+            
+            if peer_with_port not in peer_database[filename][chunk]:  # avoid duplicates
+                peer_database[filename][chunk].append(peer_with_port)
+    
     metadata = request.get("metadata")
     save_file_metadata(metadata)
 
     peer_states[peer_address] = {
         "state": "connected",
-        "last_active": time.time()
+        "last_active": time.time(),
+        "tcp_port": listening_socket_port  # Store TCP port in peer states too
     }
 
     print(f"Connected to peer: {peer_address} with files: {peer_database}")
