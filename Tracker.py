@@ -266,7 +266,7 @@ def update_peer_states():
 
         time.sleep(60)  # Check every minute
 
-def start_tracker(port = 65135):
+def start_tracker(port = 12345):
     """Starts the UDP tracker"""
     host = gethostbyname(gethostname())
     trackerSocket = socket(AF_INET, SOCK_DGRAM) #UDP socket
