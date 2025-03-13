@@ -124,6 +124,7 @@ def request_files(udpSocket, file):
         print(f"Error processing tracker response: {str(e)}")
 
 def download_file(file_data, udpSocket):
+    print("About to download")
     """Establishes TCP connections with peers to download file chunks in parallel"""
     if not file_data:
         print("No file data received. Cannot download.")
@@ -201,9 +202,11 @@ def download_file(file_data, udpSocket):
                 with chunks_lock:
                     received_chunks[chunk_num] = chunk_filename
                 print(f"Received chunk {chunk_num} of {filename} from {ip}:{port}")
+                notify_single_chunk(filename, chunk_num, udpSocket)
             
             # Close connection after all chunks from this peer
-            #tcpSocket.close()
+            #test this
+            tcpSocket.close()
             
         except Exception as e:
             print(f"Error connecting to peer {ip}:{port}: {e}")
@@ -244,6 +247,24 @@ def download_file(file_data, udpSocket):
         missing_chunks = [i for i in range(total_chunks) if i not in received_chunks]
         print(f"Missing chunks: {missing_chunks}")
 
+def notify_single_chunk(filename, chunk, udpSocket):
+    """Notifies the tracker that we now have a new chunk"""
+    peer_info = {
+        "type": "RESEED",
+        "peer_udp_address": list(udpSocket.getsockname()),
+        "filename": filename,
+        "chunk": chunk
+    }
+    
+    try:
+        udpSocket.sendto(json.dumps(peer_info).encode(), (trackerIP, trackerPort))
+        
+        # Receive acknowledgment
+        data, _ = udpSocket.recvfrom(1024)
+        print(f"Tracker updated: now seeding chunk {chunk} of {filename}")
+    except Exception as e:
+        print(f"Failed to notify tracker about chunk {chunk}: {str(e)}")
+
 def notify_new_chunks(filename, chunks, udpSocket):
     """Notifies the tracker that we now have new chunks"""
     #udpSocket = socket(AF_INET, SOCK_DGRAM)
@@ -252,7 +273,7 @@ def notify_new_chunks(filename, chunks, udpSocket):
     for chunk in chunks:
         peer_info = {
             "type": "RESEED",
-            "peer_address": list(udpSocket.getsockname()),
+            "peer_udp_address": list(udpSocket.getsockname()),
             "filename": filename,
             "chunk": chunk
         }
@@ -440,42 +461,65 @@ def main():
     try:
         shared_folder = input("Enter the folder to share: format = ./folderName\n")
         reg_peer(udpSocket, tcpSocket, trackerPort, trackerIP, shared_folder)
-        tcp_listener_thread = threading.Thread(
-        target=accept_connections,
-        args=(tcpSocket, shared_folder), daemon=True)
-        tcp_listener_thread.start()
-
-        print(prompts)
-
-        peerMssg = input("Enter a prompt: 1, 4: ")
-        try:
-            while True:
-                
-                if peerMssg == "4":
-                    print("Shutting down...")
-                    exit(udpSocket, tcpSocket)
-                    break
-                elif peerMssg == "1":
-                    #seeder requests for a file
-                    file_request = input("Enter the file/file chunk you're looking for: ")
-                    request_files(udpSocket, file_request)
-                    peerMssg = input("Enter a prompt: 1, 4: ")
-                #send_heartbeat(peerSocket, trackerIP, trackerPort)
-                time.sleep(1)
-
-        except Exception as e:
-            print(f"Something went wrong: {str(e)} Peer shutting down gracefully...")
-
-    except  FileNotFoundError:
-        print("Please enter in a valid folder name!")
-    # Start heartbeat thread
-    # heartbeat_thread = threading.Thread(target=send_heartbeat, args=(peerSocket, trackerIP, trackerPort))
-    # heartbeat_thread.daemon = True
-    # heartbeat_thread.start()
         
-    #time.sleep(300) #exit if offline for 5 min or more
-    udpSocket.close()
-    tcpSocket.close()
+        # Start TCP listener in a separate thread
+        tcp_listener_thread = threading.Thread(
+            target=accept_connections,
+            args=(tcpSocket, shared_folder), 
+            daemon=True
+        )
+        tcp_listener_thread.start()
+        
+        # Start heartbeat thread
+        heartbeat_thread = threading.Thread(
+            target=send_heartbeat,
+            args=(udpSocket, trackerIP, trackerPort),
+            daemon=True
+        )
+        heartbeat_thread.start()
+        
+        # Main I/O loop
+        while True:
+            print("\n" + prompts)
+            peerMssg = input("Enter a prompt (1, 2, 3, 4, 5): ")
+            
+            if peerMssg == "1":
+                # Register with tracker (already done initially)
+                print("Already registered with tracker.")
+                
+            elif peerMssg == "2":
+                # Request a file (become a leecher)
+                file_request = input("Enter the filename you're looking for: ")
+                request_files(udpSocket, file_request)
+                
+            elif peerMssg == "3":
+                # Update shared folder (become a seeder for additional files)
+                new_folder = input("Enter new folder to share (or press Enter to use current folder): ")
+                if new_folder:
+                    shared_folder = new_folder
+                file_chunks = check_files(shared_folder)
+                print(f"Now sharing {len(file_chunks)} files from {shared_folder}")
+                
+            elif peerMssg == "4":
+                # Update availability
+                file_chunks = check_files(shared_folder)
+                print(f"Updated file availability. Currently sharing {len(file_chunks)} files.")
+                
+            elif peerMssg == "5":
+                # Exit the network
+                print("Shutting down...")
+                exit(udpSocket, tcpSocket)
+                break
+                
+            else:
+                print("Invalid option. Please try again.")
+                
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        print("Peer shutting down gracefully...")
+    finally:
+        udpSocket.close()
+        tcpSocket.close()
     
 
 if __name__ == '__main__':

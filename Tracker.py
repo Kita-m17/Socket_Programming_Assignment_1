@@ -42,7 +42,7 @@ def remove_peer(request, addr, server, send_response=True):
     peer_udp_address = tuple(request.get("peer_udp_address"))
     print(f"Removing peer {peer_udp_address} from database.")
 
-    if peer_database in peers:
+    if peer_udp_address in peers:
         peers.remove(peer_udp_address)
     peer_states.pop(peer_udp_address, None)
 
@@ -51,7 +51,7 @@ def remove_peer(request, addr, server, send_response=True):
     for file_name, file_chunks in list(peer_database.items()):
         chunks_to_remove = []
 
-        for file_chunk, peer_list in list(peer_database.items()):
+        for chunk, peer_list in list(file_chunks.items()):
             if peer_udp_address in peer_list:
                 peer_list.remove(peer_udp_address)
             if not peer_list:
@@ -159,7 +159,8 @@ def register_peer(request, addr, server):
     
     if peer_udp_address in peers:
         print(f"Peer {peer_udp_address} re-registering. Removing old data.")
-        remove_peer({"peer_address": peer_udp_address}, addr, server, send_response=False)
+        # Fix the parameter name to match what remove_peer expects
+        remove_peer({"peer_udp_address": peer_udp_address}, addr, server, send_response=False)
     peers.append(peer_udp_address)
 
     for filename, chunk_list in file_chunks.items():
