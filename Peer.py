@@ -116,14 +116,14 @@ def request_files(udpSocket, file):
             print(f"Error: {file_data['error']}")
         else:
             print(f"Available peers for {file}: {list(file_data['peers'].keys())}")
-            download_file(file_data)
+            download_file(file_data, udpSocket)
             
     except json.JSONDecodeError:
         print(f"Invalid response from tracker: {data.decode()}")
     except Exception as e:
         print(f"Error processing tracker response: {str(e)}")
 
-def download_file(file_data):
+def download_file(file_data, udpSocket):
     """Establishes TCP connections with peers to download file chunks in parallel"""
     if not file_data:
         print("No file data received. Cannot download.")
@@ -203,7 +203,7 @@ def download_file(file_data):
                 print(f"Received chunk {chunk_num} of {filename} from {ip}:{port}")
             
             # Close connection after all chunks from this peer
-            tcpSocket.close()
+            #tcpSocket.close()
             
         except Exception as e:
             print(f"Error connecting to peer {ip}:{port}: {e}")
@@ -238,21 +238,21 @@ def download_file(file_data):
         print(f"File reassembled successfully: ./reassembled/{filename}")
         
         # Update tracker that we now have the file
-        notify_new_chunks(filename, list(received_chunks.keys()))
+        notify_new_chunks(filename, list(received_chunks.keys()), udpSocket)
     else:
         print(f"Downloaded {len(received_chunks)}/{total_chunks} chunks of {filename}")
         missing_chunks = [i for i in range(total_chunks) if i not in received_chunks]
         print(f"Missing chunks: {missing_chunks}")
 
-def notify_new_chunks(filename, chunks):
+def notify_new_chunks(filename, chunks, udpSocket):
     """Notifies the tracker that we now have new chunks"""
-    udpSocket = socket(AF_INET, SOCK_DGRAM)
-    udpSocket.bind(("", 0))
+    #udpSocket = socket(AF_INET, SOCK_DGRAM)
+    #udpSocket.bind(("", 0))
     
     for chunk in chunks:
         peer_info = {
             "type": "RESEED",
-            "peer_address": udpSocket.getsockname(),
+            "peer_address": list(udpSocket.getsockname()),
             "filename": filename,
             "chunk": chunk
         }
@@ -263,7 +263,7 @@ def notify_new_chunks(filename, chunks):
         data, _ = udpSocket.recvfrom(1024)
         print(f"Tracker response for chunk {chunk}: {data.decode()}")
     
-    udpSocket.close()
+    #udpSocket.close()
 
 def handle_client(client_socket, client_address, shared_folder):
     """Handles a client connection requesting chunks"""
@@ -475,6 +475,7 @@ def main():
         
     #time.sleep(300) #exit if offline for 5 min or more
     udpSocket.close()
+    tcpSocket.close()
     
 
 if __name__ == '__main__':
