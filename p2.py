@@ -7,11 +7,6 @@ import json
 import time
 import threading
 
-#tracker informartion
-trackerIP = '137.158.160.145' #"192.168.56.1" #196.47.210.277" #'137.158.160.145' #"192.168.56.1"  #'196.24.164.174'
-trackerPort = 12345
-listeningPort = 12000
-
 
 def get_file():
     """Retrieve all files in the current directory (excluding directories)"""
@@ -22,6 +17,10 @@ def get_file():
 
 def send_heartbeat(peerSocket, tracker_ip, tracker_port):
     """Sends a periodic heartbeat/notification to the tracker to indicate that the peer is still active"""
+    #add an event for a clean shutdown
+    global keepRunning
+    keepRunning = True
+
     while True:
         peer_info = {
             "type": "HEARTBEAT",
@@ -33,7 +32,43 @@ def send_heartbeat(peerSocket, tracker_ip, tracker_port):
         except:
             print("Failed to send heartbeat. Exiting...")
             break
-        time.sleep(60) # Send every 60 seconds
+        for _ in range(60):
+            if not keepRunning:
+                break
+            time.sleep(1)
+
+def listAvailableFiles(udpSocket, trackerIP, trackerPort):
+    #request files from the tracker
+    peer_info = {
+        "type": "LIST_FILES",
+        "peer_udp_address": list(udpSocket.getsockname())
+    }
+
+    #converts to json and send to tracker
+    list_request = json.loads(peer_info)
+    udpSocket.sendto(list_request.encode(), (trackerIP, trackerPort))
+
+    #receive file list from tracker
+    data, _ = udpSocket.recvfrom(8192)  #lrge buffer size for potentially many files
+
+    try:
+        #get the response
+        file_list = json.loads(data.decode())
+
+        if not file_list.get("files"):
+            print("No files available in the network.")
+            return []
+            
+        return file_list["files"]
+
+    except json.JSONDecodeError:
+        print(f"Invalid response from tracker: {e}")
+        print(f"Response data: {data.decode()[:100]}...")  # Print first 100 chars for debugging
+        return []
+    except Exception as e:
+        print(f"Error processing tracker response: {str(e)}")
+        return []
+
 
 def check_files(shared_folder):
     #get the file sizes
@@ -93,7 +128,7 @@ def reg_peer(udpSocket, tcpSocket, tracker_port, tracker_ip, shared_folder):
     print(f"Tracker Response: {data.decode()}")
 
 
-def request_files(udpSocket, file):
+def request_files(udpSocket, file, trackerIP, trackerPort):
     # Request file from tracker
     peer_info = {
         "type": "REQUEST",
@@ -116,31 +151,32 @@ def request_files(udpSocket, file):
             print(f"Error: {file_data['error']}")
         else:
             print(f"Available peers for {file}: {list(file_data['peers'].keys())}")
-            download_file(file_data, udpSocket)
+            download_file(file_data, udpSocket, trackerIP, trackerPort)
             
     except json.JSONDecodeError:
         print(f"Invalid response from tracker: {data.decode()}")
     except Exception as e:
         print(f"Error processing tracker response: {str(e)}")
 
-def download_file(file_data, udpSocket):
-    """Establishes TCP connections with peers to download file chunks in parallel,
+def download_file(file_data, udpSocket, trackerIP, trackerPort):
+    """Makes TCP connections with peers to download file chunks in parallel,
     distributing requests among available peers."""
     if not file_data:
+        #checks if the file exists
         print("No file data received. Cannot download.")
         return
     
     filename = file_data['filename']
     total_chunks = file_data.get('total_chunks', 0)
     if total_chunks == 0:
-        # Try to determine total chunks from the peers data
+        #tries to determine total chunks from the peers data
         all_chunks = set()
         for peer_info in file_data['peers'].values():
             all_chunks.update(peer_info['chunks'])
         total_chunks = len(all_chunks)
         print(f"Determined total chunks to be {total_chunks} based on peer data")
     
-    # Create directories for downloads and reassembled files
+    #create directories for downloads and reassembled files
     chunk_dir = "./downloads"
     reassembled_dir = "./reassembled"
     os.makedirs(chunk_dir, exist_ok=True)
@@ -148,181 +184,242 @@ def download_file(file_data, udpSocket):
     
     print(f"Downloading {filename} with {total_chunks} total chunks")
     
-    # Track which chunks we need to download and which are completed
+    #track which chunks we need to download and which are completed
     chunks_to_download = []
     for i in range(total_chunks):
         chunks_to_download.append(i)
     
+    #keeps track of all the chunks that werw downloaded
     downloaded_chunks = set()
+
+    #-----------
+    maxRetries = 3
+    retryCount = 0
+
+    while retryCount < maxRetries and chunks_to_download:
+        if retryCount > 0:
+            print(f"\nRetry attempt {retryCount}/{maxRetries} for missing chunks...")
+
+            #request updates peer information from the tracker for the missing chunks
+            missingChunksInfo = request_chunks_info(filename, chunks_to_download, udpSocket, trackerIP, trackerPort)
+            if(missingChunksInfo and 'peers' in missingChunksInfo):
+                file_data['peers'] = missingChunksInfo['peers']
+            else:
+                print("Couldnt get updated peer information for missing chunks.")
     
-    # Analyze which peers have which chunks and distribute the load
-    chunk_to_peers = {}
-    peer_load = {}  # Track how many chunks we plan to download from each peer
+        #analyze which peers have which chunks and distribute the load/allow different peers to send different chunks
+        chunk_to_peers = {}
+        peer_load = {}  #keep track of how many chunks we plan to download from each peer
     
-    # First, build a map of chunks to peers
-    for peer_key, peer_info in file_data['peers'].items():
-        peer_ip = peer_info['ip']
-        peer_port = peer_info['port']
-        peer_address = (peer_ip, peer_port)
-        peer_load[peer_address] = 0
-        
-        for chunk_num in peer_info['chunks']:
-            if chunk_num not in chunk_to_peers:
-                chunk_to_peers[chunk_num] = []
-            chunk_to_peers[chunk_num].append(peer_address)
+        #map of chunks to peers
+        for peer_key, peer_info in file_data['peers'].items():
+            peer_ip = peer_info['ip']
+            peer_port = peer_info['port']
+            peer_address = (peer_ip, peer_port)
+            peer_load[peer_address] = 0
+            
+            for chunk_num in peer_info['chunks']:
+                if chunk_num not in chunk_to_peers:
+                    chunk_to_peers[chunk_num] = []
+                chunk_to_peers[chunk_num].append(peer_address)#keep track of chunk that the peer has to send
     
-    # Display the chunk distribution
-    print(f"Found {len(file_data['peers'])} peers with the requested file")
-    for peer_key, peer_info in file_data['peers'].items():
-        print(f"Peer {peer_key} has {len(peer_info['chunks'])} chunks")
+        #display the chunk distribution
+        print(f"Found {len(file_data['peers'])} peers with the requested file")
+        for peer_key, peer_info in file_data['peers'].items():
+            available_chunks = [c for c in peer_info['chunks'] if c in chunks_to_download]
+            print(f"Peer {peer_key} has {len(peer_info['chunks'])} chunks")
+
+        # Assign chunks to peers using a round-robin approach for load balancing
+        download_assignments = []  # List of (chunk_num, peer_address) tuples
+
+        currentChunkToDownload = chunks_to_download
     
-    def download_chunk(chunk_num, peer_address):
-        """Download a specific chunk from a specific peer."""
-        peer_ip, peer_port = peer_address
-        
-        # Check if we already have this chunk
-        chunk_filename = os.path.join(chunk_dir, f"{filename}_chunk_{chunk_num}.bin")
-        if os.path.exists(chunk_filename):
-            print(f"Chunk {chunk_num} already exists, skipping download")
-            return True
-        
-        print(f"Downloading chunk {chunk_num} from peer {peer_ip}:{peer_port}")
-        
-        try:
-            # Connect to the peer
-            tcpSocket = socket(AF_INET, SOCK_STREAM)
-            tcpSocket.settimeout(30)  # Set a timeout to avoid hanging
-            
-            try:
-                tcpSocket.connect((peer_ip, peer_port))
-            except (ConnectionRefusedError, TimeoutError) as e:
-                print(f"Failed to connect to peer {peer_ip}:{peer_port}: {e}")
-                return False
-            
-            # Send chunk request
-            request = {
-                "type": "CHUNK_REQUEST",
-                "filename": filename,
-                "chunk_num": chunk_num
-            }
-            
-            # Send request length + request
-            request_data = json.dumps(request).encode()
-            length_bytes = struct.pack("!I", len(request_data))
-            
-            try:
-                tcpSocket.sendall(length_bytes + request_data)
-            except Exception as e:
-                print(f"Failed to send request to peer {peer_ip}:{peer_port}: {e}")
-                tcpSocket.close()
-                return False
-            
-            # Receive chunk data length
-            try:
-                length_bytes = tcpSocket.recv(4)
-                if not length_bytes or len(length_bytes) < 4:
-                    print(f"Connection closed by peer {peer_ip}:{peer_port} while receiving length")
-                    tcpSocket.close()
-                    return False
-            except socket.timeout:
-                print(f"Timeout waiting for response from peer {peer_ip}:{peer_port}")
-                tcpSocket.close()
-                return False
-            
-            data_length = struct.unpack("!I", length_bytes)[0]
-            print(f"Expecting {data_length} bytes for chunk {chunk_num} from {peer_ip}:{peer_port}")
-            
-            # Receive the chunk data
-            data = b""
-            remaining = data_length
-            
-            try:
-                while remaining > 0:
-                    recv_size = min(4096, remaining)
-                    chunk_data = tcpSocket.recv(recv_size)
-                    if not chunk_data:
-                        print(f"Connection closed prematurely by {peer_ip}:{peer_port}")
-                        break
-                    data += chunk_data
-                    remaining -= len(chunk_data)
-            except socket.timeout:
-                print(f"Timeout receiving data from peer {peer_ip}:{peer_port}")
-                tcpSocket.close()
-                return False
-            finally:
-                tcpSocket.close()
-            
-            if len(data) != data_length:
-                print(f"Incomplete data received: got {len(data)} bytes, expected {data_length}")
-                return False
-            
-            # Save chunk to file
-            with open(chunk_filename, "wb") as f:
-                f.write(data)
-            
-            print(f"Successfully downloaded chunk {chunk_num} ({len(data)} bytes) from {peer_ip}:{peer_port}")
-            downloaded_chunks.add(chunk_num)
-            
-            return True
-            
-        except Exception as e:
-            print(f"Error downloading chunk {chunk_num} from peer {peer_ip}:{peer_port}: {str(e)}")
-            return False
-    
-    # Assign chunks to peers using a round-robin approach for load balancing
-    download_assignments = []  # List of (chunk_num, peer_address) tuples
-    
-    while chunks_to_download:
         for chunk_num in list(chunks_to_download):
             if chunk_num not in chunk_to_peers or not chunk_to_peers[chunk_num]:
                 print(f"No peers available for chunk {chunk_num}")
                 chunks_to_download.remove(chunk_num)
                 continue
             
-            # Find the peer with the lowest current load
+            #find the peer with the lowest current load
             available_peers = chunk_to_peers[chunk_num]
             best_peer = min(available_peers, key=lambda p: peer_load[p])
             
-            # Assign this chunk to the best peer
+            #assign this chunk to the best peer
             download_assignments.append((chunk_num, best_peer))
             peer_load[best_peer] += 1
             chunks_to_download.remove(chunk_num)
     
-    # Display the download plan
-    print("\nDownload plan:")
-    for chunk_num, peer in download_assignments:
-        print(f"Chunk {chunk_num} will be downloaded from {peer[0]}:{peer[1]}")
+        #display the download plan
+        print("\nDownload plan:")
+        for chunk_num, peer in download_assignments:
+            print(f"Chunk {chunk_num} will be downloaded from {peer[0]}:{peer[1]}")
     
-    # Execute downloads sequentially for stability
-    # You can make this parallel later once the basic version works
-    for chunk_num, peer in download_assignments:
-        download_chunk(chunk_num, peer)
-        # Small delay between requests to prevent overwhelming peers
-        time.sleep(0.5)
+        #execute downloads sequentially for stability
+        for chunk_num, peer in download_assignments:
+            success = download_chunk(chunk_num, peer, filename, chunk_dir)
+            # Small delay between requests to prevent overwhelming peers
+            if success:
+                downloaded_chunks.add(chunk_num)
+            else:
+                 #if download failed, add chunk back to the list to retry
+                chunks_to_download.append(chunk_num)
+
+            time.sleep(0.5)
+
+        retryCount+=1
     
-    # Check if we've downloaded all chunks
+    #check if we've downloaded all chunks
     expected_chunks = set(range(total_chunks))
     missing_chunks = expected_chunks - downloaded_chunks
     
     if not missing_chunks:
         print(f"All {total_chunks} chunks downloaded successfully. Reassembling file...")
+        
         try:
             chunkSave.reassemble_file(filename, chunk_dir, reassembled_dir)
             print(f"Successfully reassembled file: {os.path.join(reassembled_dir, filename)}")
             
-            # Notify tracker about our new chunks
+            #notify tracker about our new chunks
             for chunk_num in downloaded_chunks:
-                notify_tracker_of_chunk(filename, chunk_num, udpSocket)
+                notify_tracker_of_chunk(filename, chunk_num, udpSocket, trackerIP, trackerPort)
             
             return True
         except Exception as e:
             print(f"Failed to reassemble file: {e}")
             return False
+        
     else:
         print(f"Download incomplete. Missing {len(missing_chunks)} chunks: {sorted(missing_chunks)}")
+
         return False
 
-def notify_tracker_of_chunk(filename, chunk_num, udpSocket):
+
+def download_chunk(chunk_num, peer_address, filename, chunk_dir):
+    """Download a specific chunk from a specific peer."""
+    peer_ip, peer_port = peer_address
+    
+    #check if we already have this chunk
+    chunk_filename = os.path.join(chunk_dir, f"{filename}_chunk_{chunk_num}.bin")
+    if os.path.exists(chunk_filename):
+        print(f"Chunk {chunk_num} already exists, skipping download")
+        return True
+    
+    print(f"Downloading chunk {chunk_num} from peer {peer_ip}:{peer_port}")
+    
+    try:
+        #connect to the peer with the chunk
+        tcpSocket = socket(AF_INET, SOCK_STREAM)
+        tcpSocket.settimeout(30)  # Set a timeout to avoid hanging
+        
+        try:
+            tcpSocket.connect((peer_ip, peer_port))
+        except (ConnectionRefusedError, TimeoutError) as e:
+            print(f"Failed to connect to peer {peer_ip}:{peer_port}: {e}")
+            return False
+        
+        # Send chunk request
+        request = {
+            "type": "CHUNK_REQUEST",
+            "filename": filename,
+            "chunk_num": chunk_num
+        }
+        
+        #rend request length + request
+        request_data = json.dumps(request).encode()
+        length_bytes = struct.pack("!I", len(request_data))
+        
+        #try to send the data
+        try:
+            tcpSocket.sendall(length_bytes + request_data)
+        except Exception as e:
+            print(f"Failed to send request to peer {peer_ip}:{peer_port}: {e}")
+            tcpSocket.close()
+            return False
+        
+        #receive chunk data length
+        try:
+            length_bytes = tcpSocket.recv(4)
+
+            if not length_bytes or len(length_bytes) < 4:
+                print(f"Connection closed by peer {peer_ip}:{peer_port} while receiving length")
+                tcpSocket.close()
+                return False
+            
+        except socket.timeout:
+            print(f"Timeout waiting for response from peer {peer_ip}:{peer_port}")
+            tcpSocket.close()
+            return False
+        
+        data_length = struct.unpack("!I", length_bytes)[0]
+        print(f"Expecting {data_length} bytes for chunk {chunk_num} from {peer_ip}:{peer_port}")
+        
+        #Receive the chunk data
+        data = b""
+        remaining = data_length
+        
+        try:
+            #loop until all expected data is received
+            while remaining > 0:
+                recv_size = min(4096, remaining)#get size of next chunk
+                chunk_data = tcpSocket.recv(recv_size)
+
+                if not chunk_data: #check if the connection was closed
+                    print(f"Connection closed prematurely by {peer_ip}:{peer_port}")
+                    break
+
+                data += chunk_data #add chunk to the chunk data
+                remaining -= len(chunk_data) #update remaining chunks ot be received
+
+        except socket.timeout:
+            print(f"Timeout receiving data from peer {peer_ip}:{peer_port}")
+            tcpSocket.close()
+            return False
+        finally:
+            tcpSocket.close()
+        
+        if len(data) != data_length:
+            print(f"Incomplete data received: got {len(data)} bytes, expected {data_length}")
+            return False
+        
+        # Save chunk to file
+        with open(chunk_filename, "wb") as f:
+            f.write(data)
+        
+        print(f"Successfully downloaded chunk {chunk_num} ({len(data)} bytes) from {peer_ip}:{peer_port}")
+        # downloaded_chunks.add(chunk_num)
+        
+        return True
+        
+    except Exception as e:
+        print(f"Error downloading chunk {chunk_num} from peer {peer_ip}:{peer_port}: {str(e)}")
+        return False
+    
+def request_chunks_info(filename, missing_chunks, udpSocket, trackerIP, trackerPort):
+    """request updated info about specific chunks from the tracker"""
+    peer_info = {
+        "type": "REQUEST_CHUNKS",
+        "peer_udp_address": list(udpSocket.getsockname()),
+        "filename": filename,
+        "chunks": missing_chunks
+    }
+
+    try:
+        udpSocket.sendto(json.dumps(peer_info).encode(), (trackerIP, trackerPort))
+
+        data, addr = udpSocket.recvfrom(4096)
+
+        try:
+            response = json.loads(data.decode())
+            return response
+        except json.JSONDecodeError:
+            print(f"Invalid response from the tracker: {data.decode()}")
+            return None
+    except Exception as e:
+        print("Error requesting chunk information: {e}")
+        return None
+
+
+def notify_tracker_of_chunk(filename, chunk_num, udpSocket, trackerIP, trackerPort):
     """Notify the tracker that we now have a new chunk"""
     try:
         peer_info = {
@@ -339,131 +436,8 @@ def notify_tracker_of_chunk(filename, chunk_num, udpSocket):
         print(f"Tracker response for chunk {chunk_num}: {data.decode()}")
     except Exception as e:
         print(f"Failed to notify tracker about chunk {chunk_num}: {e}")
-# def download_file(file_data, udpSocket):
-#     print("About to download")
-#     """Establishes TCP connections with peers to download file chunks in parallel"""
-#     if not file_data:
-#         print("No file data received. Cannot download.")
-#         return
-    
-#     filename = file_data['filename']
-#     total_chunks = file_data['total_chunks']
-#     received_chunks = {}  # Store received chunks: {chunk_num: data}
-    
-#     # Create a directory to store downloaded chunks
-#     chunk_dir = "./downloads"
-#     os.makedirs(chunk_dir, exist_ok=True)
-    
-#     print(f"Downloading {filename} with {total_chunks} total chunks")
-    
-#     # Create a lock for thread-safe access to received_chunks
-#     chunks_lock = threading.Lock()
-    
-#     # Function to download chunks from a specific peer
-#     def download_from_peer(ip, port, chunks_to_request):
-#         try:
-#             # Connect to the peer
-#             tcpSocket = socket(AF_INET, SOCK_STREAM)
-#             tcpSocket.connect((ip, port))
-#             tcpSocket.settimeout(30)  # Set a timeout to avoid hanging
-            
-#             # Request each chunk from this peer
-#             for chunk_num in chunks_to_request:
-#                 with chunks_lock:
-#                     if chunk_num in received_chunks:
-#                         print(f"Chunk {chunk_num} already received, skipping")
-#                         continue
-                
-#                 # Send chunk request
-#                 request = {
-#                     "type": "CHUNK_REQUEST",
-#                     "filename": filename,
-#                     "chunk_num": chunk_num
-#                 }
-                
-#                 # Send request length + request
-#                 request_data = json.dumps(request).encode()
-#                 length_bytes = struct.pack("!I", len(request_data))
-#                 tcpSocket.sendall(length_bytes + request_data)
-                
-#                 # Receive chunk data
-#                 length_bytes = tcpSocket.recv(4)
-#                 if not length_bytes:
-#                     print(f"Connection closed by peer {ip}:{port} while receiving length")
-#                     break
                     
-#                 data_length = struct.unpack("!I", length_bytes)[0]
-                
-#                 # Receive the chunk data
-#                 data = b""
-#                 remaining = data_length
-                
-#                 while remaining > 0:
-#                     chunk = tcpSocket.recv(min(4096, remaining))
-#                     if not chunk:
-#                         print(f"Connection closed by peer {ip}:{port} while receiving data")
-#                         break
-#                     data += chunk
-#                     remaining -= len(chunk)
-                
-#                 if len(data) != data_length:
-#                     print(f"Warning: Received {len(data)} bytes, expected {data_length}")
-#                     continue
-                
-#                 # Save chunk to file
-#                 chunk_filename = os.path.join(chunk_dir, f"{filename}_chunk_{chunk_num}.bin")
-#                 with open(chunk_filename, "wb") as f:
-#                     f.write(data)
-                
-#                 with chunks_lock:
-#                     received_chunks[chunk_num] = chunk_filename
-#                 print(f"Received chunk {chunk_num} of {filename} from {ip}:{port}")
-#                 notify_single_chunk(filename, chunk_num, udpSocket)
-            
-#             # Close connection after all chunks from this peer
-#             #test this
-#             tcpSocket.close()
-            
-#         except Exception as e:
-#             print(f"Error connecting to peer {ip}:{port}: {e}")
-#             try:
-#                 tcpSocket.close()
-#             except:
-#                 pass
-    
-#     # Create download threads for each peer
-#     download_threads = []
-#     for peer_key, peer_info in file_data['peers'].items():
-#         ip = peer_info['ip']
-#         port = peer_info['port']
-#         chunks_to_request = peer_info['chunks']
-        
-#         thread = threading.Thread(
-#             target=download_from_peer,
-#             args=(ip, port, chunks_to_request)
-#         )
-#         thread.daemon = True
-#         download_threads.append(thread)
-#         thread.start()
-    
-#     # Wait for all download threads to complete
-#     for thread in download_threads:
-#         thread.join()
-    
-#     # Check if we got all chunks
-#     if len(received_chunks) == total_chunks:
-#         print(f"All chunks of {filename} received. Reassembling...")
-#         chunkSave.reassemble_file(filename, chunk_dir, "./reassembled")
-#         print(f"File reassembled successfully: ./reassembled/{filename}")
-        
-#         # Update tracker that we now have the file
-#         notify_new_chunks(filename, list(received_chunks.keys()), udpSocket)
-#     else:
-#         print(f"Downloaded {len(received_chunks)}/{total_chunks} chunks of {filename}")
-#         missing_chunks = [i for i in range(total_chunks) if i not in received_chunks]
-#         print(f"Missing chunks: {missing_chunks}")
-
-def notify_single_chunk(filename, chunk, udpSocket):
+def notify_single_chunk(filename, chunk, udpSocket, trackerIP, trackerPort):
     """Notifies the tracker that we now have a new chunk"""
     peer_info = {
         "type": "RESEED",
@@ -480,27 +454,6 @@ def notify_single_chunk(filename, chunk, udpSocket):
         print(f"Tracker updated: now seeding chunk {chunk} of {filename}")
     except Exception as e:
         print(f"Failed to notify tracker about chunk {chunk}: {str(e)}")
-
-# def notify_new_chunks(filename, chunks, udpSocket):
-#     """Notifies the tracker that we now have new chunks"""
-#     #udpSocket = socket(AF_INET, SOCK_DGRAM)
-#     #udpSocket.bind(("", 0))
-    
-#     for chunk in chunks:
-#         peer_info = {
-#             "type": "RESEED",
-#             "peer_udp_address": list(udpSocket.getsockname()),
-#             "filename": filename,
-#             "chunk": chunk
-#         }
-        
-#         udpSocket.sendto(json.dumps(peer_info).encode(), (trackerIP, trackerPort))
-        
-#         # Receive acknowledgment
-#         data, _ = udpSocket.recvfrom(1024)
-#         print(f"Tracker response for chunk {chunk}: {data.decode()}")
-    
-#     #udpSocket.close()
 
 def handle_client(client_socket, client_address, shared_folder):
     """Handles a client connection requesting chunks"""
@@ -600,20 +553,6 @@ def accept_connections(tcpSocket, shared_folder):
             print(f"Error accepting connection: {e}")
             time.sleep(1)  # Avoid CPU spike in case of repeated errors
 
-
-def startListening(port_number=0):
-    listenSocket = socket(AF_INET, SOCK_STREAM)
-    listenSocket.bind(('', port_number))
-    tcp_port = listenSocket.getsockname()[1]
-    listenSocket.listen(10)
-
-    listener_thread = threading.Thread(target=accept_connections, daemon=True)
-    listener_thread.start()
-
-    print(f"Socket at port {tcp_port} is now listening")
-    #possibly return the port and ip (getsockname)
-    return listenSocket.getsockname()
-
 def reseed(udpSocket, tcpSocket, shared_folder, tracker_ip, tracker_port):
     file_chunks = check_files(shared_folder)
     
@@ -629,7 +568,10 @@ def reseed(udpSocket, tcpSocket, shared_folder, tracker_ip, tracker_port):
     request = json.dumps(peer_info)
     udpSocket.sendto(request.encode(), (tracker_ip, tracker_port))
 
-def exit(udpSocket, tcpSocket):
+def exit(udpSocket, tcpSocket, trackerIP, trackerPort):
+    global keepRunning
+    keepRunning = False
+
     peer_info = { 
         "type": "EXIT",
         "peer_udp_address": list(udpSocket.getsockname()),  # Convert to list
@@ -643,39 +585,68 @@ def exit(udpSocket, tcpSocket):
     data, addr = udpSocket.recvfrom(4096)
     print(f"Tracker Response: {data.decode()}")
 
+def checkTracker(udpSocket, trackerIP, trackerPort):
+    """check if the tracker exists and is reachable"""
+    try:
+        #ping the tracker
+        pingMssg= {
+            "type":"PING"
+        }
+        udpSocket.sendto(json.dumps(pingMssg).encode(), (trackerIP, trackerPort))
+        
+        #set a timeout for the response
+        udpSocket.settimeout(5)
+        try:
+            data, _ = udpSocket.recvfrom(1024)
+            udpSocket.settimeout(None)
+            return True
+        
+        except timeout:
+            print("Tracker did not respond")
+            udpSocket.settimeout(None)
+            return False
+    except Exception as e:
+        print(f"Error checking tracker: {e}")
+        return False
+
+
+
 def main():
     #register with the socket
     #tracker informartion
+    #tracker informartion
+    trackerIP = '137.158.160.145' #"192.168.56.1" #196.47.210.277" #'137.158.160.145' #"192.168.56.1"  #'196.24.164.174'
+    trackerPort = 12345
+    listeningPort = 12000
+
     host = gethostbyname(gethostname())
     udpSocket = socket(AF_INET, SOCK_DGRAM)
-    udpSocket.bind(('196.24.164.174',12000))
+    udpSocket.bind(('196.24.164.174',12006))
 
     tcpSocket = socket(AF_INET, SOCK_STREAM)
     tcpSocket.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)  # Allow reuse of the address
-    tcpSocket.bind(('196.24.164.174', 12001))
+    tcpSocket.bind(('196.24.164.174', 12007))
     tcpSocket.listen(5)  # Increase backlog
 
+    # if not checkTracker(trackerIP, trackerPort, udpSocket):
+    #     print("Tracker not available. Exiting.")
+    #     return
+
     print("Peer script started!")
-
-    # Heading = "********************SEEDSTORM BitTorrent System********************" \
-    #         "\n-Welcome to the SEEDSTORM BitTorrent System." \
-    #         "\n-A high-speed, peer-to-peer file-sharing network where peers connect, share, and storm data across the network." \
-    #         "\n-Tracker Connection: We use UDP to track and connect peers." \
-    #         "\n-File Transfer: Peers communicate via TCP for reliable data exchange" \
-    #         "\n-Seeders keep the network alive" \
-    #         "\n-Leechers get the files they need.\n"
-
+    
     prompts = "1. REGISTER with the Tracker" \
             "\n2. REQUEST a File (Become a Leecher)" \
             "\n3. Send a File (Become a Seeder)" \
             "\n4. Update Availability" \
-            "\n5. EXIT the Network"
+            "\n5. EXIT the Network" \
+            "\n6. LIST available files in the network"
 
     # print(Heading)
 
     #register peer in the system
     try:
         shared_folder = input("Enter the folder to share: format = ./folderName\n")
+        
         reg_peer(udpSocket, tcpSocket, trackerPort, trackerIP, shared_folder)
         
         # Start TCP listener in a separate thread
@@ -694,41 +665,64 @@ def main():
         )
         heartbeat_thread.start()
         
+        print("\n" + prompts)
+        peerMssg = input("Enter a prompt (1, 2, 3, 4, 5): ")
+            
         # Main I/O loop
         while True:
-            print("\n" + prompts)
-            peerMssg = input("Enter a prompt (1, 2, 3, 4, 5): ")
             
             if peerMssg == "1":
-                # Register with tracker (already done initially)
-                print("Already registered with tracker.")
-                
-            elif peerMssg == "2":
                 # Request a file (become a leecher)
                 file_request = input("Enter the filename you're looking for: ")
-                request_files(udpSocket, file_request)
+                check_files(shared_folder)
+                request_files(udpSocket, file_request, trackerIP, trackerPort)
                 
-            elif peerMssg == "3":
+            elif peerMssg == "2":
                 # Update shared folder (become a seeder for additional files)
                 new_folder = input("Enter new folder to share (or press Enter to use current folder): ")
                 if new_folder:
                     shared_folder = new_folder
                 file_chunks = check_files(shared_folder)
                 print(f"Now sharing {len(file_chunks)} files from {shared_folder}")
+                reseed(udpSocket, tcpSocket, shared_folder, trackerIP, trackerPort)
+                # accept_connections(tcpSocket, shared_folder)
                 
-            elif peerMssg == "4":
+            elif peerMssg == "3":
                 # Update availability
                 file_chunks = check_files(shared_folder)
                 print(f"Updated file availability. Currently sharing {len(file_chunks)} files.")
                 
-            elif peerMssg == "5":
+            elif peerMssg == "4":
                 # Exit the network
                 print("Shutting down...")
-                exit(udpSocket, tcpSocket)
+                exit(udpSocket, tcpSocket, trackerIP, trackerPort)
                 break
+            # elif peerMssg == "5":
+            #     # List available files in the network
+            #     available_files = tuple(listAvailableFiles(udpSocket, trackerIP, trackerPort))
                 
+            #     if available_files:
+            #         print("\nFiles Available in the Network:")
+            #         print("=" * 80)
+            #         print(f"{'Filename':<30} {'Size':<15} {'Chunks':<10} {'Peers':<10}")
+            #         print("-" * 80)
+                    
+            #         for filename, file_info in available_files.items():
+            #             size = file_info.get("size", 0)
+            #             size_str = f"{size/1024/1024:.2f} MB" if size else "Unknown"
+            #             chunks = file_info.get("num_chunks", "Unknown")
+            #             peers = file_info.get("peer_count", 0)
+                        
+            #             print(f"{filename:<30} {size_str:<15} {chunks:<10} {peers:<10}")
+            #     else:
+            #         print("No files available in the network.")
+                            
             else:
                 print("Invalid option. Please try again.")
+
+
+            print("\n" + prompts)
+            peerMssg = input("Enter a prompt (1, 2, 3, 4, 5): ")
                 
     except Exception as e:
         print(f"Error: {str(e)}")

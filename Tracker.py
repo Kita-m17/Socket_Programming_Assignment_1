@@ -27,6 +27,15 @@ def handle_peer_requests(data, addr, server):
     elif request["type"] == "HEARTBEAT":
         update_peer_activity(addr, server)
 
+    elif request["type"] == "REQUEST_CHUNKS":
+        request_specific_chunks(request, addr, server)
+
+    elif request["type"] == "LIST_FILES":
+        getAvailableFiles(addr, server)
+        
+    elif request["type"] == "PING":
+        server.sendto(b"PONG", addr)
+
 
 def save_file_metadata(metadata):
     for file_info in metadata:
@@ -36,6 +45,30 @@ def save_file_metadata(metadata):
                 "size": file_info.get("size"),
                 "num_chunks": file_info.get("num_chunks")
             }
+
+def getAvailableFiles(addr, server):
+    """Send a list of available peers to the requesting peer"""
+    #Create a copy of file_metadata with peer counts
+    file_list = {}
+
+    for filename, metadata in file_metadata.items():
+        file_list[filename] = {
+            "size": metadata.get("size", 0),
+            "num_chunks": metadata.get("num_chunks", 0)
+        }
+        # Add peer count if the file exists in peer_database
+        if filename in peer_database:
+            peer_count = sum(len(peer_list) for peer_list in peer_database[filename].values())
+            file_list[filename]["peer_count"] = peer_count
+    
+    response = {
+        "type": "FILE_LIST",
+        "files": list(file_list)
+    }
+
+    server.sendto(json.dumps(response).encode(), addr)
+
+
 
 def remove_peer(request, addr, server, send_response=True):
     """Removes a peer and its shared chunks from the tracker database."""
@@ -193,7 +226,62 @@ def get_peer_tcp_address(peer_udp_address):
     if peer_info:
         return peer_info.get("tcp_address") #get tcp address of peer
     return None #if peer is non existent
+
+def request_specific_chunks(request, addr, server):
+    """Return specific request for chunk"""
+    filename = request.get("filename", "")
+    requested_chunks = request.get("chunks", [])
+
+    if not filename or filename not in peer_database:
+        server.sendto(json.dumps({"error": "File not found"}).encode(), addr)
+        return
+        
+    if not requested_chunks:
+        server.sendto(json.dumps({"error": "No chunks specified"}).encode(), addr)
+        return
     
+    # Initialize the response
+    response = {
+        "filename": filename,
+        "peers": {},
+        "requested_chunks": requested_chunks
+    }
+
+    #get requested chunks
+    for chunk_num in requested_chunks:
+        # Convert chunk number to string if it's stored that way in your database
+        chunk_key = str(chunk_num) if isinstance(next(iter(peer_database[filename].keys()), ""), str) else chunk_num
+        
+        if chunk_key not in peer_database[filename]:
+            continue
+    
+    for peer_udp_address in peer_database[filename][chunk_key]:
+            #etg the TCP address from peer_states using UDP address
+            tcp_address = get_peer_tcp_address(peer_udp_address)
+            if not tcp_address:
+                continue  # Skip if TCP address not available
+                
+            peer_ip = peer_udp_address[0]
+            peer_udp_port = peer_udp_address[1]
+            peer_tcp_port = tcp_address[1]
+            
+            peer_key = f"{peer_ip}:{peer_udp_port}"
+
+
+            if peer_key not in response["peers"]:
+                response["peers"][peer_key] = {
+                    "ip": peer_ip,
+                    "port": peer_tcp_port,  #use the TCP port for file transfers
+                    "chunks": []
+                }
+
+            response["peers"][peer_key]["chunks"].append(chunk_num)
+
+    # Send the JSON response
+    print(f"Sending chunk information for {len(response['peers'])} peers with requested chunks")
+    server.sendto(json.dumps(response).encode(), addr)
+              
+
 def check_peer_activity():
     """Periodically check if peers are still active"""
     while True:
