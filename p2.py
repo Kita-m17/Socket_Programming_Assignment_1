@@ -168,6 +168,8 @@ def download_file(file_data, udpSocket, trackerIP, trackerPort):
     
     filename = file_data['filename']
     total_chunks = file_data.get('total_chunks', 0)
+    # Get chunk hashes from the tracker response
+    chunk_hashes = file_data.get('chunk_hashes', {})
     if total_chunks == 0:
         #tries to determine total chunks from the peers data
         all_chunks = set()
@@ -251,21 +253,20 @@ def download_file(file_data, udpSocket, trackerIP, trackerPort):
     
         #display the download plan
         print("\nDownload plan:")
-        for chunk_num, peer in download_assignments:
-            print(f"Chunk {chunk_num} will be downloaded from {peer[0]}:{peer[1]}")
-    
-        #execute downloads sequentially for stability
-        for chunk_num, peer in download_assignments:
-            success = download_chunk(chunk_num, peer, filename, chunk_dir)
-            # Small delay between requests to prevent overwhelming peers
-            if success:
-                downloaded_chunks.add(chunk_num)
-            else:
-                 #if download failed, add chunk back to the list to retry
-                chunks_to_download.append(chunk_num)
+         # Execute downloads sequentially for stability
+    for chunk_num, peer in download_assignments:
+        # Get the expected hash for this chunk if available
+        expected_hash = chunk_hashes.get(str(chunk_num)) or chunk_hashes.get(chunk_num)
+        
+        success = download_chunk(chunk_num, peer, filename, chunk_dir, expected_hash)
+        # Small delay between requests to prevent overwhelming peers
+        if success:
+            downloaded_chunks.add(chunk_num)
+        else:
+            # If download failed, add chunk back to the list to retry
+            chunks_to_download.append(chunk_num)
 
-            time.sleep(0.5)
-
+        time.sleep(0.5)
         retryCount+=1
     
     #check if we've downloaded all chunks
@@ -294,23 +295,35 @@ def download_file(file_data, udpSocket, trackerIP, trackerPort):
         return False
 
 
-def download_chunk(chunk_num, peer_address, filename, chunk_dir):
-    """Download a specific chunk from a specific peer."""
+def download_chunk(chunk_num, peer_address, filename, chunk_dir, expected_hash=None):
+    """Download a specific chunk from a specific peer and verify its hash if provided."""
     peer_ip, peer_port = peer_address
     
-    #check if we already have this chunk
+    # Check if we already have this chunk
     chunk_filename = os.path.join(chunk_dir, f"{filename}_chunk_{chunk_num}.bin")
     if os.path.exists(chunk_filename):
-        print(f"Chunk {chunk_num} already exists, skipping download")
-        return True
+        # If we have a hash to verify against, verify the existing chunk
+        if expected_hash:
+            with open(chunk_filename, "rb") as f:
+                chunk_data = f.read()
+                actual_hash = chunkSave.hash_chunk_with_data(chunk_data)
+                if actual_hash == expected_hash:
+                    print(f"Chunk {chunk_num} already exists and hash verified, skipping download")
+                    return True
+                else:
+                    print(f"Chunk {chunk_num} exists but hash verification failed, redownloading")
+                    # Continue with download since hash verification failed
+        else:
+            print(f"Chunk {chunk_num} already exists, skipping download")
+            return True
     
     print(f"Downloading chunk {chunk_num} from peer {peer_ip}:{peer_port}")
     
     try:
-        #connect to the peer with the chunk
+        # Connect to the peer with the chunk
         tcpSocket = socket(AF_INET, SOCK_STREAM)
         tcpSocket.settimeout(30)  # Set a timeout to avoid hanging
-        
+
         try:
             tcpSocket.connect((peer_ip, peer_port))
         except (ConnectionRefusedError, TimeoutError) as e:
@@ -381,13 +394,23 @@ def download_chunk(chunk_num, peer_address, filename, chunk_dir):
             print(f"Incomplete data received: got {len(data)} bytes, expected {data_length}")
             return False
         
-        # Save chunk to file
+         # Save and verify chunk
         with open(chunk_filename, "wb") as f:
             f.write(data)
         
-        print(f"Successfully downloaded chunk {chunk_num} ({len(data)} bytes) from {peer_ip}:{peer_port}")
-        # downloaded_chunks.add(chunk_num)
+        # Verify the hash if expected_hash is provided
+        if expected_hash:
+            actual_hash = chunkSave.hash_chunk_with_data(data)
+            if actual_hash != expected_hash:
+                print(f"Hash verification failed for chunk {chunk_num}!")
+                print(f"Expected: {expected_hash}")
+                print(f"Actual: {actual_hash}")
+                os.remove(chunk_filename)  # Remove the invalid chunk
+                return False
+            else:
+                print(f"Hash verification successful for chunk {chunk_num}")
         
+        print(f"Successfully downloaded chunk {chunk_num} ({len(data)} bytes) from {peer_ip}:{peer_port}")
         return True
         
     except Exception as e:
@@ -619,13 +642,13 @@ def main():
     trackerPort = 12345
     listeningPort = 12000
 
-    host = gethostbyname(gethostname())
+    # host = gethostbyname(gethostname())
     udpSocket = socket(AF_INET, SOCK_DGRAM)
-    udpSocket.bind(('196.24.164.174',12006))
+    udpSocket.bind(("196.42.84.95",12000))
 
     tcpSocket = socket(AF_INET, SOCK_STREAM)
     tcpSocket.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)  # Allow reuse of the address
-    tcpSocket.bind(('196.24.164.174', 12007))
+    tcpSocket.bind(("196.42.84.95", 12001))
     tcpSocket.listen(5)  # Increase backlog
 
     # if not checkTracker(trackerIP, trackerPort, udpSocket):

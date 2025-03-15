@@ -40,10 +40,11 @@ def handle_peer_requests(data, addr, server):
 def save_file_metadata(metadata):
     for file_info in metadata:
         file_name = file_info.get("filename")
-        if(file_name not in file_metadata):
+        if file_name not in file_metadata:
             file_metadata[file_name] = {
                 "size": file_info.get("size"),
-                "num_chunks": file_info.get("num_chunks")
+                "num_chunks": file_info.get("num_chunks"),
+                "chunk_hashes": file_info.get("chunk_hashes", {})
             }
 
 def getAvailableFiles(addr, server):
@@ -136,14 +137,17 @@ def peer_file_request(request, addr, server):
         server.sendto(json.dumps({"error": "No peers with file"}).encode(), addr)
         return
 
-    # Get the chunk list if the file exists in the database
+    # Get the chunk list and hashes if the file exists in the database
     file_data = peer_database.get(filename, {})
+    file_meta = file_metadata.get(filename, {})
+    chunk_hashes = file_meta.get("chunk_hashes", {})
 
     # Initialize the response with the new structure
     response = {
         "filename": filename,
         "peers": {},
-        "total_chunks": len(file_data)
+        "total_chunks": len(file_data),
+        "chunk_hashes": chunk_hashes  # Include chunk hashes in response
     }
 
     # Include all peers without filtering
