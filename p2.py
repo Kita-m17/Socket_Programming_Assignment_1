@@ -95,6 +95,13 @@ def check_files(shared_folder):
 
 def reg_peer(udpSocket, tcpSocket, tracker_port, tracker_ip, shared_folder):
     print(f"Files in {shared_folder}:", os.listdir(shared_folder))
+    # Clear the chunks directory to remove old chunks
+    chunk_dir = "./chunks"
+    for file in os.listdir(chunk_dir):
+        try:
+            os.remove(os.path.join(chunk_dir, file))
+        except Exception as e:
+            print(f"Error removing file {file}: {e}")
 
     file_chunks = check_files(shared_folder)
     
@@ -185,8 +192,12 @@ def download_file(file_data, udpSocket, trackerIP, trackerPort):
     for i in range(total_chunks):
         chunks_to_download.append(i)
     
-    #keeps track of all the chunks that werw downloaded
+    #keeps track of all the chunks that were downloaded
     downloaded_chunks = set()
+
+    # Initialize progress tracking
+    total_progress = 0
+    bar_length = 50  # Length of the progress bar in characters
 
     #-----------
     maxRetries = 3
@@ -201,7 +212,7 @@ def download_file(file_data, udpSocket, trackerIP, trackerPort):
             if(missingChunksInfo and 'peers' in missingChunksInfo):
                 file_data['peers'] = missingChunksInfo['peers']
             else:
-                print("Couldnt get updated peer information for missing chunks.")
+                print("Couldn't get updated peer information for missing chunks.")
     
         #analyze which peers have which chunks and distribute the load/allow different peers to send different chunks
         chunk_to_peers = {}
@@ -247,27 +258,56 @@ def download_file(file_data, udpSocket, trackerIP, trackerPort):
         print("\nDownload plan:")
         for chunk_num, peer in download_assignments:
             print(f"Chunk {chunk_num} will be downloaded from {peer[0]}:{peer[1]}")
-    
+        
+        print("\nDownload progress:")
+
+        # Reset the progress counter for this batch
+        current_batch_count = 0
+        total_batch_count = len(download_assignments)
+        
         #execute downloads sequentially for stability
         for chunk_num, peer in download_assignments:
+            # Update the progress bar for current chunk
+            progress_percent = (current_batch_count / total_batch_count) * 100
+            filled_length = int(bar_length * current_batch_count // total_batch_count)
+            bar = '█' * filled_length + '-' * (bar_length - filled_length)
+            
+            # Clear the previous line
+            print(f"\r[{bar}] {progress_percent:.1f}% - Downloading chunk {chunk_num} from {peer[0]}:{peer[1]}...", end='')
+            
             success = download_chunk(chunk_num, peer, filename, chunk_dir)
             # Small delay between requests to prevent overwhelming peers
             if success:
                 downloaded_chunks.add(chunk_num)
+                current_batch_count += 1
+                
+                # Update progress for successful download
+                progress_percent = (current_batch_count / total_batch_count) * 100
+                filled_length = int(bar_length * current_batch_count // total_batch_count)
+                bar = '█' * filled_length + '-' * (bar_length - filled_length)
+                print(f"\r[{bar}] {progress_percent:.1f}% - Chunk {chunk_num} downloaded successfully.", end='')
             else:
-                 #if download failed, add chunk back to the list to retry
+                #if download failed, add chunk back to the list to retry
                 chunks_to_download.append(chunk_num)
+                print(f"\rFailed to download chunk {chunk_num}! Will retry later.")
 
             time.sleep(0.5)
-
-        retryCount+=1
+        
+        # Print newline after completion of batch
+        print()
+        
+        retryCount += 1
+        
+        # Update overall progress
+        total_progress = (len(downloaded_chunks) / total_chunks) * 100
+        print(f"\nOverall progress: {total_progress:.1f}% ({len(downloaded_chunks)}/{total_chunks} chunks)")
     
     #check if we've downloaded all chunks
     expected_chunks = set(range(total_chunks))
     missing_chunks = expected_chunks - downloaded_chunks
     
     if not missing_chunks:
-        print(f"All {total_chunks} chunks downloaded successfully. Reassembling file...")
+        print(f"\nAll {total_chunks} chunks downloaded successfully. Reassembling file...")
         
         try:
             chunkSave.reassemble_file(filename, chunk_dir, reassembled_dir)
@@ -283,10 +323,8 @@ def download_file(file_data, udpSocket, trackerIP, trackerPort):
             return False
         
     else:
-        print(f"Download incomplete. Missing {len(missing_chunks)} chunks: {sorted(missing_chunks)}")
-
+        print(f"\nDownload incomplete. Missing {len(missing_chunks)} chunks: {sorted(missing_chunks)}")
         return False
-
 
 def download_chunk(chunk_num, peer_address, filename, chunk_dir):
     """Download a specific chunk from a specific peer."""
@@ -295,10 +333,7 @@ def download_chunk(chunk_num, peer_address, filename, chunk_dir):
     #check if we already have this chunk
     chunk_filename = os.path.join(chunk_dir, f"{filename}_chunk_{chunk_num}.bin")
     if os.path.exists(chunk_filename):
-        print(f"Chunk {chunk_num} already exists, skipping download")
         return True
-    
-    print(f"Downloading chunk {chunk_num} from peer {peer_ip}:{peer_port}")
     
     try:
         #connect to the peer with the chunk
@@ -308,7 +343,6 @@ def download_chunk(chunk_num, peer_address, filename, chunk_dir):
         try:
             tcpSocket.connect((peer_ip, peer_port))
         except (ConnectionRefusedError, TimeoutError) as e:
-            print(f"Failed to connect to peer {peer_ip}:{peer_port}: {e}")
             return False
         
         # Send chunk request
@@ -318,7 +352,7 @@ def download_chunk(chunk_num, peer_address, filename, chunk_dir):
             "chunk_num": chunk_num
         }
         
-        #rend request length + request
+        #send request length + request
         request_data = json.dumps(request).encode()
         length_bytes = struct.pack("!I", len(request_data))
         
@@ -326,7 +360,6 @@ def download_chunk(chunk_num, peer_address, filename, chunk_dir):
         try:
             tcpSocket.sendall(length_bytes + request_data)
         except Exception as e:
-            print(f"Failed to send request to peer {peer_ip}:{peer_port}: {e}")
             tcpSocket.close()
             return False
         
@@ -335,17 +368,14 @@ def download_chunk(chunk_num, peer_address, filename, chunk_dir):
             length_bytes = tcpSocket.recv(4)
 
             if not length_bytes or len(length_bytes) < 4:
-                print(f"Connection closed by peer {peer_ip}:{peer_port} while receiving length")
                 tcpSocket.close()
                 return False
             
         except socket.timeout:
-            print(f"Timeout waiting for response from peer {peer_ip}:{peer_port}")
             tcpSocket.close()
             return False
         
         data_length = struct.unpack("!I", length_bytes)[0]
-        print(f"Expecting {data_length} bytes for chunk {chunk_num} from {peer_ip}:{peer_port}")
         
         #Receive the chunk data
         data = b""
@@ -354,38 +384,37 @@ def download_chunk(chunk_num, peer_address, filename, chunk_dir):
         try:
             #loop until all expected data is received
             while remaining > 0:
-                recv_size = min(4096, remaining)#get size of next chunk
+                recv_size = min(4096, remaining)  # Get size of next chunk
                 chunk_data = tcpSocket.recv(recv_size)
 
-                if not chunk_data: #check if the connection was closed
-                    print(f"Connection closed prematurely by {peer_ip}:{peer_port}")
+                if not chunk_data:  # Check if the connection was closed
                     break
 
-                data += chunk_data #add chunk to the chunk data
-                remaining -= len(chunk_data) #update remaining chunks ot be received
+                data += chunk_data  # Add chunk to the chunk data
+                remaining -= len(chunk_data)  # Update remaining chunks to be received
+                
+                # Calculate and display download percentage for this chunk
+                if data_length > 0:
+                    percent_complete = ((data_length - remaining) / data_length) * 100
+                    # We don't print here to avoid cluttering the terminal
+                    # The parent function will handle the overall progress display
 
         except socket.timeout:
-            print(f"Timeout receiving data from peer {peer_ip}:{peer_port}")
             tcpSocket.close()
             return False
         finally:
             tcpSocket.close()
         
         if len(data) != data_length:
-            print(f"Incomplete data received: got {len(data)} bytes, expected {data_length}")
             return False
         
         # Save chunk to file
         with open(chunk_filename, "wb") as f:
             f.write(data)
         
-        print(f"Successfully downloaded chunk {chunk_num} ({len(data)} bytes) from {peer_ip}:{peer_port}")
-        # downloaded_chunks.add(chunk_num)
-        
         return True
         
     except Exception as e:
-        print(f"Error downloading chunk {chunk_num} from peer {peer_ip}:{peer_port}: {str(e)}")
         return False
     
 def request_chunks_info(filename, missing_chunks, udpSocket, trackerIP, trackerPort):
