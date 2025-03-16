@@ -629,6 +629,62 @@ def checkTracker(udpSocket, trackerIP, trackerPort):
         print(f"Error checking tracker: {e}")
         return False
     
+def update_availability(udpSocket, tcpSocket, shared_folder, tracker_ip, tracker_port):
+    """Update file availability by rescanning the shared folder and notifying the tracker"""
+    print(f"Updating file availability from {shared_folder}...")
+    
+    # First, notify the tracker to remove all our existing chunks
+    peer_info = {
+        "type": "EXIT",
+        "peer_udp_address": list(udpSocket.getsockname()),
+        "peer_tcp_address": list(tcpSocket.getsockname())
+    }
+
+    request = json.dumps(peer_info)
+    udpSocket.sendto(request.encode(), (tracker_ip, tracker_port))
+    
+    # Wait for acknowledgment from tracker
+    try:
+        data, _ = udpSocket.recvfrom(1024)
+        print(f"Tracker response: {data.decode()}")
+    except Exception as e:
+        print(f"Error receiving response from tracker: {e}")
+        return {}
+    
+    # Clear existing chunks directory to remove old chunks
+    chunk_dir = "./chunks"
+    for file in os.listdir(chunk_dir):
+        try:
+            os.remove(os.path.join(chunk_dir, file))
+        except Exception as e:
+            print(f"Error removing file {file}: {e}")
+    
+    # Rescan the shared folder and create fresh chunks
+    file_chunks = check_files(shared_folder)
+    
+    # Get addresses as tuples
+    udp_address = udpSocket.getsockname()
+    tcp_address = tcpSocket.getsockname()
+    
+    # Prepare update message
+    update_info = {
+        "type": "REGISTER",  # Re-register with updated information
+        "peer_udp_address": list(udp_address),
+        "peer_tcp_address": list(tcp_address),
+        "files": file_chunks,
+        "metadata": chunkSave.get_file_metadata(512000, shared_folder)
+    }
+    
+    # Convert to JSON and send to tracker
+    update_request = json.dumps(update_info)
+    udpSocket.sendto(update_request.encode(), (tracker_ip, tracker_port))
+    
+    # Receive acknowledgment from tracker
+    data, _ = udpSocket.recvfrom(1024)
+    print(f"Tracker Response: {data.decode()}")
+    
+    return file_chunks
+    
 def exit(udpSocket, tcpSocket, trackerIP, trackerPort):
     global keepRunning
     keepRunning = False
@@ -713,9 +769,9 @@ def main():
                 
             elif peerMssg == "3":
                 # Update availability
-                file_chunks = check_files(shared_folder)
+                file_chunks = update_availability(udpSocket, tcpSocket, shared_folder, trackerIP, trackerPort)
                 print(f"Updated file availability. Currently sharing {len(file_chunks)} files.")
-                
+                    
             elif peerMssg == "4":
                 # Exit the network
                 print("Shutting down...")
@@ -737,9 +793,16 @@ def main():
         print(f"Error: {str(e)}")
         print("Peer shutting down gracefully...")
     finally:
+        # Clear the chunks directory to remove old chunks
+        chunk_dir = "./chunks"
+        for file in os.listdir(chunk_dir):
+            try:
+                os.remove(os.path.join(chunk_dir, file))
+            except Exception as e:
+                print(f"Error removing file {file}: {e}")
         udpSocket.close()
         tcpSocket.close()
-    
+        
 
 if __name__ == '__main__':
     main()

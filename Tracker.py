@@ -1,6 +1,7 @@
 from socket import *
 import json
 import time
+import threading
 
 STATE_TIMEOUT = 300 #timeout for inactive peers (seconds)
 away_threshold = 120
@@ -40,22 +41,22 @@ def handle_peer_requests(data, addr, server):
 def save_file_metadata(metadata):
     for file_info in metadata:
         file_name = file_info.get("filename")
-        if file_name not in file_metadata:
+        if(file_name not in file_metadata):
             file_metadata[file_name] = {
                 "size": file_info.get("size"),
-                "num_chunks": file_info.get("num_chunks"),
-                "chunk_hashes": file_info.get("chunk_hashes", {})
+                "num_chunks": file_info.get("num_chunks")
             }
 
 def getAvailableFiles(addr, server):
     """Send a list of available peers to the requesting peer"""
-    
+    #Create a copy of file_metadata with peer counts
     response = {
         "type": "FILE_LIST",
         "files": peer_database
     }
 
     server.sendto(json.dumps(response).encode(), addr)
+    print(peer_database)
 
 
 
@@ -125,17 +126,14 @@ def peer_file_request(request, addr, server):
         server.sendto(json.dumps({"error": "No peers with file"}).encode(), addr)
         return
 
-    # Get the chunk list and hashes if the file exists in the database
+    # Get the chunk list if the file exists in the database
     file_data = peer_database.get(filename, {})
-    file_meta = file_metadata.get(filename, {})
-    chunk_hashes = file_meta.get("chunk_hashes", {})
 
     # Initialize the response with the new structure
     response = {
         "filename": filename,
         "peers": {},
-        "total_chunks": len(file_data),
-        "chunk_hashes": chunk_hashes  # Include chunk hashes in response
+        "total_chunks": len(file_data)
     }
 
     # Include all peers without filtering
@@ -285,10 +283,17 @@ def check_peer_activity():
 
 def update_peer_activity(addr, server):
     """Updates the last active timestamp of a peer."""
+    #while True:
+    #current_time = time.time()
+    #peer_ip = addr[0]
+
     if addr in peer_states:
         peer_states[addr]["last_active"] = time.time()
         peer_states[addr]["state"] = "active"
         print(f"Received heartbeat from {addr}, marked as active")
+    #     server.sendto(b"Heartbeat received", addr)
+    # else:
+    #     server.sendto(b"Peer not registered", addr)
 
 def update_peer_states():
     """Checks the peer activity and their states based on timeout"""
@@ -339,8 +344,12 @@ def update_peer_states():
 
         time.sleep(60)  # Check every minute
 
-def start_tracker(port = 12354):
+def start_tracker(port = 12345):
     """Starts the UDP tracker"""
+    
+    # Start the peer state monitoring thread
+    state_monitor_thread = threading.Thread(target=update_peer_states, daemon=True)
+    state_monitor_thread.start()
     
     trackerSocket = socket(AF_INET, SOCK_DGRAM) #UDP socket
     host = gethostbyname(gethostname())

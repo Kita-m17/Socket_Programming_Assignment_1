@@ -41,13 +41,13 @@ def get_file_metadata(chunk_size, path):
             num_chunks = file_size // chunk_size + (1 if file_size % chunk_size != 0 else 0)
 
             #compute the file hash
-            #file_hash = hash_chunk(file_path)
+            file_hash = hash_chunk(file_path)
             
             file_metadata.append(
                 { "Filename": file,
                  "size": file_size,
                  "num_chunks": num_chunks,
-                 #"hash": file_hash
+                 "hash": file_hash
                 })
     return file_metadata
             
