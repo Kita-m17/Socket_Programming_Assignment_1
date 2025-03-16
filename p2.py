@@ -28,7 +28,7 @@ def send_heartbeat(peerSocket, tracker_ip, tracker_port):
         }
         try:
             peerSocket.sendto(json.dumps(peer_info).encode(), (tracker_ip, tracker_port))
-            print("Sent heartbeat to tracker.")
+            #print("Sent heartbeat to tracker.")
         except:
             print("Failed to send heartbeat. Exiting...")
             break
@@ -628,8 +628,23 @@ def checkTracker(udpSocket, trackerIP, trackerPort):
     except Exception as e:
         print(f"Error checking tracker: {e}")
         return False
+    
+def exit(udpSocket, tcpSocket, trackerIP, trackerPort):
+    global keepRunning
+    keepRunning = False
 
+    peer_info = { 
+        "type": "EXIT",
+        "peer_udp_address": list(udpSocket.getsockname()),  # Convert to list
+        "peer_tcp_address": list(tcpSocket.getsockname())   # Convert to list
+    }
+    request = json.dumps(peer_info)
+    
+    udpSocket.sendto(request.encode(), (trackerIP, trackerPort))
 
+    #tracker response
+    data, addr = udpSocket.recvfrom(4096)
+    print(f"Tracker Response: {data.decode()}")
 
 def main():
     #register with the socket
