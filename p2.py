@@ -66,15 +66,18 @@ def listAvailableFiles(udpSocket, trackerIP, trackerPort):
 
 
 def check_files(shared_folder):
-    #get the file sizes
+    file_chunks = {}
+    
+    # Get the file sizes
     file_sizes = chunkSave.get_files(os.path.join(shared_folder))
     
     for file in os.listdir(shared_folder):
         file_path = os.path.join(shared_folder, file)
 
+        # Check if file exists and is a file (not a directory)
         if not os.path.exists(file_path):
             print(f"Error: File {file_path} not found.")
-            return
+            continue
         
         if os.path.isdir(file_path):
             print(f"Skipping directory: {file_path}")
@@ -107,6 +110,8 @@ def reg_peer(udpSocket, tcpSocket, tracker_port, tracker_ip, shared_folder):
         "files": file_chunks,
         "metadata": chunkSave.get_file_metadata(512000, shared_folder)
     }
+
+    print(peer_info)
 
     # Convert to json and send to tracker
     register_request = json.dumps(peer_info)
@@ -543,39 +548,61 @@ def accept_connections(tcpSocket, shared_folder):
             time.sleep(1)  # Avoid CPU spike in case of repeated errors
 
 def reseed(udpSocket, tcpSocket, shared_folder, tracker_ip, tracker_port):
-    file_chunks = check_files(shared_folder)
+    # exit(udpSocket, tcpSocket, tracker_ip, tracker_port)
     
+    # file_chunks = check_files(shared_folder)
+     # First, notify the tracker to remove all our existing chunks
     peer_info = {
-        "type": "RESEED",
+        "type": "EXIT",
         "peer_udp_address": list(udpSocket.getsockname()),
-        "peer_tcp_address": list(tcpSocket.getsockname()),
-        "file_chunks": file_chunks
+        "peer_tcp_address": list(tcpSocket.getsockname())
     }
 
     request = json.dumps(peer_info)
     udpSocket.sendto(request.encode(), (tracker_ip, tracker_port))
-    # Wait for response
+    
+    # Wait for acknowledgment from tracker
     try:
         data, _ = udpSocket.recvfrom(1024)
-        print(f"Tracker Response: {data.decode()}")
+        print(f"Tracker response: {data.decode()}")
     except Exception as e:
         print(f"Error receiving response from tracker: {e}")
+        return
 
-def exit(udpSocket, tcpSocket, trackerIP, trackerPort):
-    global keepRunning
-    keepRunning = False
+    # Clear the chunks directory to remove old chunks
+    chunk_dir = "./chunks"
+    for file in os.listdir(chunk_dir):
+        try:
+            os.remove(os.path.join(chunk_dir, file))
+        except Exception as e:
+            print(f"Error removing file {file}: {e}")
 
-    peer_info = { 
-        "type": "EXIT",
-        "peer_udp_address": list(udpSocket.getsockname()),  # Convert to list
-        "peer_tcp_address": list(tcpSocket.getsockname())   # Convert to list
+    # Now process the new files from the shared folder
+    file_chunks = check_files(shared_folder)
+    # Re-register with the tracker
+    # Get addresses as tuples
+    udp_address = udpSocket.getsockname()
+    tcp_address = tcpSocket.getsockname()
+
+    # Peer info message
+    peer_info = {
+        "type": "REGISTER",
+        "peer_udp_address": list(udp_address),
+        "peer_tcp_address": list(tcp_address),
+        "files": file_chunks,
+        "metadata": chunkSave.get_file_metadata(512000, shared_folder)
     }
-    request = json.dumps(peer_info)
-    
-    udpSocket.sendto(request.encode(), (trackerIP, trackerPort))
 
-    #tracker response
-    data, addr = udpSocket.recvfrom(4096)
+     # Convert to json and send to tracker
+    register_request = json.dumps(peer_info)
+    udpSocket.sendto(register_request.encode(), (tracker_ip, tracker_port))
+
+    # reg_peer( udpSocket, tcpSocket, tracker_port, tracker_ip, shared_folder)
+    
+    print(f"Sent new peer file information to tracker")
+    
+    # Receive acknowledgment from tracker
+    data, _ = udpSocket.recvfrom(1024)
     print(f"Tracker Response: {data.decode()}")
 
 def checkTracker(udpSocket, trackerIP, trackerPort):
@@ -608,14 +635,14 @@ def main():
     #register with the socket
     #tracker informartion
     trackerIP = '137.158.160.145' 
-    trackerPort = 12354
+    trackerPort = 12345
 
     udpSocket = socket(AF_INET, SOCK_DGRAM)
-    udpSocket.bind(('196.24.164.174',12005))
+    udpSocket.bind(('196.42.84.95',12005))
 
     tcpSocket = socket(AF_INET, SOCK_STREAM)
     tcpSocket.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)  # Allow reuse of the address
-    tcpSocket.bind(('196.24.164.174', 12003))
+    tcpSocket.bind(('196.42.84.95', 12003))
     tcpSocket.listen(5)  # Increase backlog
 
     print("Peer script started!")
@@ -665,8 +692,8 @@ def main():
                 new_folder = input("Enter new folder to share (or press Enter to use current folder): ")
                 if new_folder:
                     shared_folder = new_folder
-                file_chunks = check_files(shared_folder)
-                print(f"Now sharing {len(file_chunks)} files from {shared_folder}")
+                # file_chunks = check_files(shared_folder)
+                print(f"Now sharing files from {shared_folder}")
                 reseed(udpSocket, tcpSocket, shared_folder, trackerIP, trackerPort)
                 
             elif peerMssg == "3":
