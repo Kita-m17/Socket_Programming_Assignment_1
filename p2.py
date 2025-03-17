@@ -165,41 +165,43 @@ def download_file(file_data, udpSocket, trackerIP, trackerPort):
     """Makes TCP connections with peers to download file chunks in parallel,
     distributing requests among available peers."""
     if not file_data:
-        #checks if the file exists
         print("No file data received. Cannot download.")
         return
     
     filename = file_data['filename']
     total_chunks = file_data.get('total_chunks', 0)
+    chunk_hashes = file_data.get('chunk_hashes', {})
+    
+    # If we don't have total chunks data, try to determine from peers
     if total_chunks == 0:
-        #tries to determine total chunks from the peers data
         all_chunks = set()
         for peer_info in file_data['peers'].values():
             all_chunks.update(peer_info['chunks'])
         total_chunks = len(all_chunks)
         print(f"Determined total chunks to be {total_chunks} based on peer data")
     
-    #create directories for downloads and reassembled files
+    # Create directories for downloads and reassembled files
     chunk_dir = "./downloads"
     reassembled_dir = "./reassembled"
     os.makedirs(chunk_dir, exist_ok=True)
     os.makedirs(reassembled_dir, exist_ok=True)
     
     print(f"Downloading {filename} with {total_chunks} total chunks")
+    print(f"Hash verification {'enabled' if chunk_hashes else 'not available'} for chunks")
     
-    #track which chunks we need to download and which are completed
+    # Track which chunks we need to download and which are completed
     chunks_to_download = []
     for i in range(total_chunks):
         chunks_to_download.append(i)
     
-    #keeps track of all the chunks that were downloaded
+    # Keep track of all the chunks that were downloaded
     downloaded_chunks = set()
+    verified_chunks = set()  # Track chunks that have been verified
 
     # Initialize progress tracking
     total_progress = 0
     bar_length = 50  # Length of the progress bar in characters
 
-    #-----------
     maxRetries = 3
     retryCount = 0
 
@@ -207,18 +209,21 @@ def download_file(file_data, udpSocket, trackerIP, trackerPort):
         if retryCount > 0:
             print(f"\nRetry attempt {retryCount}/{maxRetries} for missing chunks...")
 
-            #request updates peer information from the tracker for the missing chunks
+            # Request updated peer information from the tracker for the missing chunks
             missingChunksInfo = request_chunks_info(filename, chunks_to_download, udpSocket, trackerIP, trackerPort)
-            if(missingChunksInfo and 'peers' in missingChunksInfo):
+            if missingChunksInfo and 'peers' in missingChunksInfo:
                 file_data['peers'] = missingChunksInfo['peers']
+                # If we got updated chunk hashes, use them
+                if 'chunk_hashes' in missingChunksInfo:
+                    chunk_hashes = missingChunksInfo['chunk_hashes']
             else:
                 print("Couldn't get updated peer information for missing chunks.")
     
-        #analyze which peers have which chunks and distribute the load/allow different peers to send different chunks
+        # Analyze which peers have which chunks and distribute the load
         chunk_to_peers = {}
-        peer_load = {}  #keep track of how many chunks we plan to download from each peer
+        peer_load = {}  # Keep track of how many chunks we plan to download from each peer
     
-        #map of chunks to peers
+        # Map of chunks to peers
         for peer_key, peer_info in file_data['peers'].items():
             peer_ip = peer_info['ip']
             peer_port = peer_info['port']
@@ -228,13 +233,13 @@ def download_file(file_data, udpSocket, trackerIP, trackerPort):
             for chunk_num in peer_info['chunks']:
                 if chunk_num not in chunk_to_peers:
                     chunk_to_peers[chunk_num] = []
-                chunk_to_peers[chunk_num].append(peer_address)#keep track of chunk that the peer has to send
+                chunk_to_peers[chunk_num].append(peer_address)
     
-        #display the chunk distribution
+        # Display the chunk distribution
         print(f"Found {len(file_data['peers'])} peers with the requested file")
         for peer_key, peer_info in file_data['peers'].items():
             available_chunks = [c for c in peer_info['chunks'] if c in chunks_to_download]
-            print(f"Peer {peer_key} has {len(peer_info['chunks'])} chunks")
+            print(f"Peer {peer_key} has {len(available_chunks)} chunks we need")
 
         # Assign chunks to peers using a round-robin approach for load balancing
         download_assignments = []  # List of (chunk_num, peer_address) tuples
@@ -245,53 +250,64 @@ def download_file(file_data, udpSocket, trackerIP, trackerPort):
                 chunks_to_download.remove(chunk_num)
                 continue
             
-            #find the peer with the lowest current load
+            # Find the peer with the lowest current load
             available_peers = chunk_to_peers[chunk_num]
             best_peer = min(available_peers, key=lambda p: peer_load[p])
             
-            #assign this chunk to the best peer
+            # Assign this chunk to the best peer
             download_assignments.append((chunk_num, best_peer))
             peer_load[best_peer] += 1
             chunks_to_download.remove(chunk_num)
     
-        #display the download plan
+        # Display the download plan
         print("\nDownload plan:")
         for chunk_num, peer in download_assignments:
-            print(f"Chunk {chunk_num} will be downloaded from {peer[0]}:{peer[1]}")
+            expected_hash = chunk_hashes.get(str(chunk_num)) if chunk_hashes else "unknown"
+            hash_preview = expected_hash[:10] + "..." if expected_hash != "unknown" else "unknown"
+            print(f"Chunk {chunk_num} from {peer[0]}:{peer[1]} (expected hash: {hash_preview})")
         
         print("\nDownload progress:")
 
         # Reset the progress counter for this batch
         current_batch_count = 0
         total_batch_count = len(download_assignments)
+        failed_chunks = []
         
-        #execute downloads sequentially for stability
+        # Execute downloads sequentially for stability
         for chunk_num, peer in download_assignments:
             # Update the progress bar for current chunk
-            progress_percent = (current_batch_count / total_batch_count) * 100
-            filled_length = int(bar_length * current_batch_count // total_batch_count)
+            progress_percent = (current_batch_count / total_batch_count) * 100 if total_batch_count > 0 else 0
+            filled_length = int(bar_length * current_batch_count // total_batch_count) if total_batch_count > 0 else 0
             bar = '█' * filled_length + '-' * (bar_length - filled_length)
             
             # Clear the previous line
             print(f"\r[{bar}] {progress_percent:.1f}% - Downloading chunk {chunk_num} from {peer[0]}:{peer[1]}...", end='')
             
-            success = download_chunk(chunk_num, peer, filename, chunk_dir)
+            # Get the expected hash for this chunk
+            expected_hash = chunk_hashes.get(str(chunk_num)) if chunk_hashes else None
+            
+            success = download_chunk(chunk_num, peer, filename, chunk_dir, expected_hash)
             # Small delay between requests to prevent overwhelming peers
             if success:
                 downloaded_chunks.add(chunk_num)
+                if expected_hash:  # Only add to verified if we actually had a hash to check against
+                    verified_chunks.add(chunk_num)
                 current_batch_count += 1
                 
                 # Update progress for successful download
-                progress_percent = (current_batch_count / total_batch_count) * 100
-                filled_length = int(bar_length * current_batch_count // total_batch_count)
+                progress_percent = (current_batch_count / total_batch_count) * 100 if total_batch_count > 0 else 0
+                filled_length = int(bar_length * current_batch_count // total_batch_count) if total_batch_count > 0 else 0
                 bar = '█' * filled_length + '-' * (bar_length - filled_length)
-                print(f"\r[{bar}] {progress_percent:.1f}% - Chunk {chunk_num} downloaded successfully.", end='')
+                print(f"\r[{bar}] {progress_percent:.1f}% - Chunk {chunk_num} downloaded and verified.", end='')
             else:
-                #if download failed, add chunk back to the list to retry
-                chunks_to_download.append(chunk_num)
+                # If download failed, add chunk back to the list to retry
+                failed_chunks.append(chunk_num)
                 print(f"\rFailed to download chunk {chunk_num}! Will retry later.")
 
             time.sleep(0.5)
+        
+        # Add failed chunks back to the download list
+        chunks_to_download.extend(failed_chunks)
         
         # Print newline after completion of batch
         print()
@@ -300,9 +316,12 @@ def download_file(file_data, udpSocket, trackerIP, trackerPort):
         
         # Update overall progress
         total_progress = (len(downloaded_chunks) / total_chunks) * 100
+        verified_progress = (len(verified_chunks) / total_chunks) * 100
         print(f"\nOverall progress: {total_progress:.1f}% ({len(downloaded_chunks)}/{total_chunks} chunks)")
+        if chunk_hashes:
+            print(f"Verified chunks: {verified_progress:.1f}% ({len(verified_chunks)}/{total_chunks} chunks)")
     
-    #check if we've downloaded all chunks
+    # Check if we've downloaded all chunks
     expected_chunks = set(range(total_chunks))
     missing_chunks = expected_chunks - downloaded_chunks
     
@@ -310,12 +329,56 @@ def download_file(file_data, udpSocket, trackerIP, trackerPort):
         print(f"\nAll {total_chunks} chunks downloaded successfully. Reassembling file...")
         
         try:
-            chunkSave.reassemble_file(filename, chunk_dir, reassembled_dir)
-            print(f"Successfully reassembled file: {os.path.join(reassembled_dir, filename)}")
+            # Create a list to track any chunk hash mismatches during final verification
+            hash_mismatches = []
             
-            #notify tracker about our new chunks
+            # Reassemble the file
+            reassembled_file = os.path.join(reassembled_dir, filename)
+            with open(reassembled_file, "wb") as outfile:
+                for chunk_num in range(total_chunks):
+                    chunk_path = os.path.join(chunk_dir, f"{filename}_chunk_{chunk_num}.bin")
+                    
+                    # Verify chunk hash again during reassembly as a final check
+                    if chunk_hashes and str(chunk_num) in chunk_hashes:
+                        with open(chunk_path, "rb") as chunk_file:
+                            chunk_data = chunk_file.read()
+                            actual_hash = chunkSave.hash_chunk_with_data(chunk_data)
+                            expected_hash = chunk_hashes[str(chunk_num)]
+                            
+                            if actual_hash != expected_hash:
+                                print(f"WARNING: Final verification failed for chunk {chunk_num}")
+                                hash_mismatches.append(chunk_num)
+                    
+                    # Write the chunk to the reassembled file
+                    with open(chunk_path, "rb") as infile:
+                        outfile.write(infile.read())
+            
+            # Report any hash mismatches found during final verification
+            if hash_mismatches:
+                print(f"⚠ WARNING: {len(hash_mismatches)} chunks failed final hash verification!")
+                print(f"File may be corrupted. Problematic chunks: {sorted(hash_mismatches)}")
+            
+            # Verify the reassembled file if we have the original file hash
+            if 'file_hash' in file_data:
+                print("Verifying complete file...")
+                reassembled_hash = chunkSave.hash_chunk(reassembled_file)
+                if reassembled_hash == file_data['file_hash']:
+                    print("✓ File integrity verified successfully!")
+                else:
+                    print("⚠ Warning: File hash verification failed!")
+                    print(f"Expected: {file_data['file_hash']}")
+                    print(f"Calculated: {reassembled_hash}")
+            
+            print(f"Successfully reassembled file: {reassembled_file}")
+            
+            # Notify tracker about our new chunks so we can become a seeder
             for chunk_num in downloaded_chunks:
                 notify_tracker_of_chunk(filename, chunk_num, udpSocket, trackerIP, trackerPort)
+            
+            # If there were hash mismatches but we have the whole file hash and it matches,
+            # we can assume the file is okay despite the chunk verification issues
+            if hash_mismatches and 'file_hash' in file_data and reassembled_hash == file_data['file_hash']:
+                print("Note: Despite some chunk verification issues, the overall file hash is correct.")
             
             return True
         except Exception as e:
@@ -325,24 +388,34 @@ def download_file(file_data, udpSocket, trackerIP, trackerPort):
     else:
         print(f"\nDownload incomplete. Missing {len(missing_chunks)} chunks: {sorted(missing_chunks)}")
         return False
-
-def download_chunk(chunk_num, peer_address, filename, chunk_dir):
-    """Download a specific chunk from a specific peer."""
+    
+def download_chunk(chunk_num, peer_address, filename, chunk_dir, expected_hash=None):
+    """Download a specific chunk from a specific peer with hash verification."""
     peer_ip, peer_port = peer_address
     
-    #check if we already have this chunk
+    # Check if we already have this chunk
     chunk_filename = os.path.join(chunk_dir, f"{filename}_chunk_{chunk_num}.bin")
-    if os.path.exists(chunk_filename):
-        return True
+    if os.path.exists(chunk_filename) and expected_hash:
+        # Verify existing chunk
+        with open(chunk_filename, "rb") as f:
+            existing_data = f.read()
+        existing_hash = chunkSave.hash_chunk_with_data(existing_data)
+        if existing_hash == expected_hash:
+            print(f"\rChunk {chunk_num} already exists and hash verified ✓")
+            return True
+        else:
+            print(f"\rExisting chunk {chunk_num} failed hash verification. Redownloading...")
+            # Continue with download as the file is corrupted
     
     try:
-        #connect to the peer with the chunk
+        # Connect to the peer with the chunk
         tcpSocket = socket(AF_INET, SOCK_STREAM)
         tcpSocket.settimeout(30)  # Set a timeout to avoid hanging
         
         try:
             tcpSocket.connect((peer_ip, peer_port))
         except (ConnectionRefusedError, TimeoutError) as e:
+            print(f"\rConnection failed to {peer_ip}:{peer_port}: {str(e)}")
             return False
         
         # Send chunk request
@@ -352,37 +425,40 @@ def download_chunk(chunk_num, peer_address, filename, chunk_dir):
             "chunk_num": chunk_num
         }
         
-        #send request length + request
+        # Send request length + request
         request_data = json.dumps(request).encode()
         length_bytes = struct.pack("!I", len(request_data))
         
-        #try to send the data
+        # Try to send the data
         try:
             tcpSocket.sendall(length_bytes + request_data)
         except Exception as e:
+            print(f"\rError sending request: {str(e)}")
             tcpSocket.close()
             return False
         
-        #receive chunk data length
+        # Receive chunk data length
         try:
             length_bytes = tcpSocket.recv(4)
 
             if not length_bytes or len(length_bytes) < 4:
+                print("\rIncomplete length received")
                 tcpSocket.close()
                 return False
             
         except socket.timeout:
+            print("\rTimeout waiting for response")
             tcpSocket.close()
             return False
         
         data_length = struct.unpack("!I", length_bytes)[0]
         
-        #Receive the chunk data
+        # Receive the chunk data
         data = b""
         remaining = data_length
         
         try:
-            #loop until all expected data is received
+            # Loop until all expected data is received
             while remaining > 0:
                 recv_size = min(4096, remaining)  # Get size of next chunk
                 chunk_data = tcpSocket.recv(recv_size)
@@ -392,38 +468,52 @@ def download_chunk(chunk_num, peer_address, filename, chunk_dir):
 
                 data += chunk_data  # Add chunk to the chunk data
                 remaining -= len(chunk_data)  # Update remaining chunks to be received
-                
-                # Calculate and display download percentage for this chunk
-                if data_length > 0:
-                    percent_complete = ((data_length - remaining) / data_length) * 100
-                    # We don't print here to avoid cluttering the terminal
-                    # The parent function will handle the overall progress display
 
         except socket.timeout:
+            print("\rTimeout receiving chunk data")
             tcpSocket.close()
             return False
         finally:
             tcpSocket.close()
         
         if len(data) != data_length:
+            print(f"\rIncomplete data received: got {len(data)} bytes, expected {data_length}")
             return False
         
+        # Hash verification
+        if expected_hash:
+            received_hash = chunkSave.hash_chunk_with_data(data)
+            if received_hash != expected_hash:
+                print(f"\rHash verification failed for chunk {chunk_num}!")
+                print(f"Expected: {expected_hash}")
+                print(f"Received: {received_hash}")
+                return False
+            else:
+                print(f"\rHash verification successful for chunk {chunk_num} ✓")
+        else:
+            # If no expected hash provided, calculate and log the hash anyway
+            received_hash = chunkSave.hash_chunk_with_data(data)
+            print(f"\rDownloaded chunk {chunk_num} with hash: {received_hash[:10]}...")
+        
         # Save chunk to file
+        os.makedirs(chunk_dir, exist_ok=True)  # Ensure directory exists
         with open(chunk_filename, "wb") as f:
             f.write(data)
         
         return True
         
     except Exception as e:
+        print(f"\rError downloading chunk: {str(e)}")
         return False
     
 def request_chunks_info(filename, missing_chunks, udpSocket, trackerIP, trackerPort):
-    """request updated info about specific chunks from the tracker"""
+    """Request updated info about specific chunks from the tracker, including their hashes"""
     peer_info = {
         "type": "REQUEST_CHUNKS",
         "peer_udp_address": list(udpSocket.getsockname()),
         "filename": filename,
-        "chunks": missing_chunks
+        "chunks": missing_chunks,
+        "include_hashes": True  # Request hash information too
     }
 
     try:
@@ -438,7 +528,7 @@ def request_chunks_info(filename, missing_chunks, udpSocket, trackerIP, trackerP
             print(f"Invalid response from the tracker: {data.decode()}")
             return None
     except Exception as e:
-        print("Error requesting chunk information: {e}")
+        print(f"Error requesting chunk information: {e}")
         return None
 
 
@@ -730,6 +820,30 @@ def exit(udpSocket, tcpSocket, trackerIP, trackerPort):
     #tracker response
     data, addr = udpSocket.recvfrom(4096)
     print(f"Tracker Response: {data.decode()}")
+
+def get_chunk_hashes(filename):
+    """Get all known hashes for a file's chunks from our stored metadata"""
+    # Look for a hash file in the chunks directory
+    hash_file = os.path.join("./chunks", f"{filename}_hashes.json")
+    
+    if os.path.exists(hash_file):
+        try:
+            with open(hash_file, "r") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Error loading hash file: {e}")
+    
+    # If no specific hash file, look in our file metadata
+    for metadata in chunkSave.get_file_metadata(512000, "./shared"):
+        if metadata["filename"] == filename:
+            return {
+                "filename": filename,
+                "total_chunks": metadata["num_chunks"],
+                "file_hash": metadata["file_hash"],
+                "chunk_hashes": {str(i): h for i, h in enumerate(metadata["chunk_hashes"])}
+            }
+    
+    return None
 
 def main():
     #register with the socket

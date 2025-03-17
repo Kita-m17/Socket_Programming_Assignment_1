@@ -1,6 +1,7 @@
 import os
 import math
 import hashlib
+import json
 
 def get_peer_file_chunks(shared_folder):
     """
@@ -28,7 +29,6 @@ def get_peer_file_chunks(shared_folder):
 def get_file_metadata(chunk_size, path):
     """Returns metadata about files in the current directory, including their sizes, number of chunks, and hashes"""
     file_metadata = []
-    #path = './'
     files = os.listdir(path)
     for file in files:
         file_path = os.path.join(path, file)
@@ -40,16 +40,33 @@ def get_file_metadata(chunk_size, path):
             # Calculate the number of chunks required
             num_chunks = file_size // chunk_size + (1 if file_size % chunk_size != 0 else 0)
 
-            #compute the file hash
+            # Compute the file hash
             file_hash = hash_chunk(file_path)
             
-            file_metadata.append(
-                { "Filename": file,
-                 "size": file_size,
-                 "num_chunks": num_chunks,
-                 "hash": file_hash
-                })
+            # Generate chunk hashes
+            chunk_hashes = generate_chunk_hashes(file_path, chunk_size)
+            
+            file_metadata.append({
+                "filename": file,
+                "size": file_size,
+                "num_chunks": num_chunks,
+                "file_hash": file_hash,
+                "chunk_hashes": chunk_hashes
+            })
     return file_metadata
+
+def generate_chunk_hashes(file_path, chunk_size):
+    """Generates SHA-256 hashes for each chunk of the file"""
+    chunk_hashes = []
+    
+    with open(file_path, "rb") as file:
+        chunk_index = 0
+        while chunk := file.read(chunk_size):
+            chunk_hash = hash_chunk_with_data(chunk)
+            chunk_hashes.append(chunk_hash)
+            chunk_index += 1
+            
+    return chunk_hashes
             
 
 def hash_chunk_with_data(data):
@@ -83,9 +100,7 @@ def make_directory(filename):
         print(f"Permission required to create {dir_path}")
 
 def split_chunks(shared_folder, filename, file_sizes):
-    """Splits a file into 512KB chunks and saves them in a 'chunks' directory."""
-    #file_path = f"./{filename}"
-    path = os.listdir(shared_folder)
+    """Splits a file into 512KB chunks, computes hashes, and saves them in a 'chunks' directory."""
     file_path = os.path.join(shared_folder, filename)
     
     if filename not in file_sizes:
@@ -93,7 +108,7 @@ def split_chunks(shared_folder, filename, file_sizes):
         return
 
     num_bytes = file_sizes[filename]
-    chunk_hashes = [] #stpre hash, chunk_filename
+    chunk_hashes = []  # store hash, chunk_filename pairs
     
     # Create a directory to store chunks
     chunk_dir = "./chunks"
@@ -104,19 +119,31 @@ def split_chunks(shared_folder, filename, file_sizes):
         while (chunk := file.read(512000)):  # Read up to 512KB
             chunk_filename = os.path.join(chunk_dir, f"{filename}_chunk_{chunk_index}.bin")
 
-            #hash chunk
+            # Hash chunk
             chunk_hash = hash_chunk_with_data(chunk)
+            chunk_hashes.append((chunk_hash, chunk_filename))  # Store hash and filename
 
             with open(chunk_filename, "wb") as chunk_file:
                 chunk_file.write(chunk)
 
-            chunk_hashes.append((chunk_hash, chunk_filename)) # Store hash and filename
-            print(f"Saved {len(chunk)} bytes to {chunk_filename}")
-
+            print(f"Saved {len(chunk)} bytes to {chunk_filename} with hash {chunk_hash[:10]}...")
             chunk_index += 1
 
-    print(f"File {filename} split into {chunk_index} chunks.")
-
+    print(f"File {filename} split into {chunk_index} chunks with hashes.")
+    
+    # Create a separate file with hash information for verification
+    hash_file = os.path.join(chunk_dir, f"{filename}_hashes.json")
+    hash_data = {
+        "filename": filename,
+        "total_chunks": chunk_index,
+        "chunk_hashes": {str(i): hash for i, (hash, _) in enumerate(chunk_hashes)}
+    }
+    
+    with open(hash_file, "w") as f:
+        json.dump(hash_data, f, indent=2)
+    
+    print(f"Chunk hash information saved to {hash_file}")
+    
     return chunk_hashes
 
 #hashing provides integrity verification, ensuring that the file wasnt corrupted of tampered with during transmission
@@ -131,7 +158,7 @@ def hash_chunk(file_path):
     return sha256.hexdigest()
 
 def reassemble_file(original_filename, chunk_dir="./chunks", output_dir="./reassembled"):
-    """Reassembles split file chunks into the original file."""
+    """Reassembles split file chunks into the original file with hash verification."""
     
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
@@ -146,17 +173,76 @@ def reassemble_file(original_filename, chunk_dir="./chunks", output_dir="./reass
     # Sort chunk files by their index
     chunk_files.sort(key=lambda x: int(x.split("_chunk_")[-1].split(".bin")[0]))  
 
+    # Check if we have hash information for verification
+    hash_file = os.path.join(chunk_dir, f"{original_filename}_hashes.json")
+    hash_data = None
+    if os.path.exists(hash_file):
+        try:
+            with open(hash_file, "r") as f:
+                hash_data = json.load(f)
+            print(f"Found hash information for {original_filename}. Verification enabled.")
+        except Exception as e:
+            print(f"Error loading hash file: {e}")
+    
+    # Track verification results
+    verified_chunks = 0
+    failed_chunks = []
+
     output_file = os.path.join(output_dir, original_filename)
     
     with open(output_file, "wb") as outfile:
-        for chunk_file in chunk_files:
+        for i, chunk_file in enumerate(chunk_files):
             chunk_path = os.path.join(chunk_dir, chunk_file)
+            
+            # Verify hash if available
+            if hash_data and "chunk_hashes" in hash_data and str(i) in hash_data["chunk_hashes"]:
+                with open(chunk_path, "rb") as f:
+                    chunk_data = f.read()
+                
+                actual_hash = hash_chunk_with_data(chunk_data)
+                expected_hash = hash_data["chunk_hashes"][str(i)]
+                
+                if actual_hash == expected_hash:
+                    verified_chunks += 1
+                    print(f"✓ Chunk {i} verified successfully.")
+                else:
+                    failed_chunks.append(i)
+                    print(f"⚠ Hash verification FAILED for chunk {i}!")
+                    print(f"  Expected: {expected_hash}")
+                    print(f"  Actual:   {actual_hash}")
+            
+            # Append chunk data to output file
             with open(chunk_path, "rb") as infile:
-                outfile.write(infile.read())  # Append chunk data
+                outfile.write(infile.read())
             
             print(f"Reassembled {chunk_file} into {output_file}")
 
+    # Print verification summary if hash verification was performed
+    if hash_data:
+        total_chunks = len(chunk_files)
+        if failed_chunks:
+            print(f"\n⚠ WARNING: {len(failed_chunks)} out of {total_chunks} chunks failed verification!")
+            print(f"Failed chunks: {failed_chunks}")
+            print("The reassembled file may be corrupted.")
+        else:
+            print(f"\n✓ All {total_chunks} chunks verified successfully.")
+    
     print(f"\nReassembly complete: {output_file}")
+    
+    # Calculate and display the file hash
+    file_hash = hash_chunk(output_file)
+    print(f"Final file hash: {file_hash}")
+    
+    # Verify against original file hash if available
+    if hash_data and "file_hash" in hash_data:
+        if file_hash == hash_data["file_hash"]:
+            print("✓ Complete file hash verified successfully!")
+        else:
+            print("⚠ WARNING: Complete file hash verification failed!")
+            print(f"  Expected: {hash_data['file_hash']}")
+            print(f"  Actual:   {file_hash}")
+
+
 
 
 # Get file sizes and store them in a dictionary
