@@ -243,8 +243,6 @@ def reassemble_file(original_filename, chunk_dir="./chunks", output_dir="./reass
             print(f"  Actual:   {file_hash}")
 
 
-
-
 # Get file sizes and store them in a dictionary
 # file_sizes = get_files()
 
