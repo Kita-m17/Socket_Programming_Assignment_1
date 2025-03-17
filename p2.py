@@ -860,13 +860,22 @@ def main():
     tcpSocket.listen(5)  # Increase backlog
 
     print("Peer script started!")
+
+    Heading = "********************SEEDSTORM BitTorrent System********************" \
+            "\n-Welcome to the SEEDSTORM BitTorrent System." \
+            "\n-A high-speed, peer-to-peer file-sharing network where peers connect, share, and storm data across the network." \
+            "\n-Tracker Connection: We use UDP to track and connect peers." \
+            "\n-File Transfer: Peers communicate via TCP for reliable data exchange" \
+            "\n-Seeders keep the network alive" \
+            "\n-Leechers get the files they need.\n"
     
     prompts = "1. REQUEST a File (Become a Leecher)" \
             "\n2. Send a File (Become a Seeder)" \
             "\n3. Update Availability" \
-            "\n4. EXIT the Network" \
-            "\n5. LIST available files in the network"
-
+            "\n4. LIST available files in the network" \
+            "\n5. EXIT the Network" 
+            
+    print(Heading)
     #register peer in the system
     try:
         shared_folder = input("Enter the folder to share: format = ./folderName\n")
@@ -916,15 +925,14 @@ def main():
                 print(f"Updated file availability. Currently sharing {len(file_chunks)} files.")
                     
             elif peerMssg == "4":
+                 # List available files in the network
+                available_files = listAvailableFiles(udpSocket, trackerIP, trackerPort)              
+                print(tuple(available_files.get("files")))
+            elif peerMssg == "5":
                 # Exit the network
                 print("Shutting down...")
                 exit(udpSocket, tcpSocket, trackerIP, trackerPort)
                 break
-            elif peerMssg == "5":
-                # List available files in the network
-                available_files = listAvailableFiles(udpSocket, trackerIP, trackerPort)
-                
-                print(tuple(available_files.get("files")))
             else:
                 print("No files available in the network.")
 
@@ -945,6 +953,13 @@ def main():
                 print(f"Error removing file {file}: {e}")
         udpSocket.close()
         tcpSocket.close()
+    # Clear chunks when peer leaves abruptly 
+    chunk_dir = "./chunks"
+    for file in os.listdir(chunk_dir):
+        try:
+            os.remove(os.path.join(chunk_dir, file))
+        except Exception as e:
+            print(f"Error removing file {file}: {e}")
         
         
 

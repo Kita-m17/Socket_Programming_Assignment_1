@@ -37,6 +37,7 @@ def handle_peer_requests(data, addr, server):
     elif request["type"] == "PING":
         server.sendto(b"PONG", addr)
 
+
 def save_file_metadata(metadata):
     for file_info in metadata:
         file_name = file_info.get("filename")
@@ -306,9 +307,6 @@ def update_peer_states():
             if inactive_time > STATE_TIMEOUT:
                 print(f"Peer {peer} removed due to inactivity.")
                 peers_to_remove.append(peer)  # Mark for removal
-
-                # del peer_database[peer]  # Remove fully inactive peers
-                # peers.remove(peer) if peer in peers else None
             elif inactive_time > away_threshold and data["state"] == "active":
                 print(f"Peer {peer} marked as 'away'.")
                 peer_states[peer]["state"] = "away"
@@ -324,22 +322,25 @@ def update_peer_states():
 
             # Remove peer from peer_database
             for file_name, file_chunks in list(peer_database.items()):
-                chunks_to_remove = []
+                chunks_to_remove = []  # Initialize outside the inner loop
 
                 for chunk, peer_list in list(file_chunks.items()):
                     if peer in peer_list:
                         peer_list.remove(peer)
                     if not peer_list:  # If no peers left, remove chunk
-                        chunks_to_remove = []
-                        #del file_chunks[chunk]
+                        chunks_to_remove.append(chunk)  # Add to list, don't reset it
+                
+                # Execute chunk removal outside the inner loop
+                for chunk in chunks_to_remove:
+                    del file_chunks[chunk]
+                    
+                # If no chunks remain, mark the file for removal
+                if not file_chunks:
+                    files_to_remove.append(file_name)
 
-                    for chunk in chunks_to_remove:
-                        del file_chunks[chunk]
-                    if not file_chunks:
-                        files_to_remove.append(file_name)
-
-                for file_name in files_to_remove:
-                    del peer_database[file_name]
+            # Remove empty files outside the file iteration loop
+            for file_name in files_to_remove:
+                del peer_database[file_name]
 
         time.sleep(60)  # Check every minute
 
@@ -356,7 +357,7 @@ def start_tracker(port = 12345):
     print(f"Tracker {trackerSocket.getsockname()} is running")
     
     while True:
-        data, addr = trackerSocket.recvfrom(4096)
+        data, addr = trackerSocket.recvfrom(8192)
         handle_peer_requests(data, addr, trackerSocket)
 
 start_tracker()
