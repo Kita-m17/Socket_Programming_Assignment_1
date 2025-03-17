@@ -37,7 +37,6 @@ def handle_peer_requests(data, addr, server):
     elif request["type"] == "PING":
         server.sendto(b"PONG", addr)
 
-
 def save_file_metadata(metadata):
     for file_info in metadata:
         file_name = file_info.get("filename")
