@@ -26,29 +26,30 @@ def get_peer_file_chunks(shared_folder):
     return file_chunks
 
 def get_file_metadata(chunk_size, path):
-    """Returns metadata about files in the current directory, including their sizes, number of chunks, and hashes"""
+    """Returns metadata about files including sizes, number of chunks, and chunk hashes"""
     file_metadata = []
-    #path = './'
     files = os.listdir(path)
+    
     for file in files:
         file_path = os.path.join(path, file)
 
         # Ensure it's a file (not a directory)
-        if os.path.isfile(file_path):
+        if os.path.isfile(file_path) and not file.endswith('.bin'):
             file_size = os.path.getsize(file_path)
 
             # Calculate the number of chunks required
             num_chunks = file_size // chunk_size + (1 if file_size % chunk_size != 0 else 0)
-
-            #compute the file hash
-            #file_hash = hash_chunk(file_path)
             
-            file_metadata.append(
-                { "Filename": file,
-                 "size": file_size,
-                 "num_chunks": num_chunks,
-                 #"hash": file_hash
-                })
+            # Generate chunk hashes
+            chunk_hashes = split_chunks(path, file, {file: file_size})
+            
+            file_metadata.append({
+                "filename": file,
+                "size": file_size,
+                "num_chunks": num_chunks,
+                "chunk_hashes": chunk_hashes
+            })
+    
     return file_metadata
             
 
@@ -83,17 +84,14 @@ def make_directory(filename):
         print(f"Permission required to create {dir_path}")
 
 def split_chunks(shared_folder, filename, file_sizes):
-    """Splits a file into 512KB chunks and saves them in a 'chunks' directory."""
-    #file_path = f"./{filename}"
-    path = os.listdir(shared_folder)
+    """Splits a file into 512KB chunks, saves them in 'chunks' directory, and returns their hashes."""
     file_path = os.path.join(shared_folder, filename)
     
     if filename not in file_sizes:
         print(f"File {filename} not found in file_sizes dictionary.")
-        return
+        return {}
 
-    num_bytes = file_sizes[filename]
-    chunk_hashes = [] #stpre hash, chunk_filename
+    chunk_hashes = {}  # Store {chunk_index: hash} pairs
     
     # Create a directory to store chunks
     chunk_dir = "./chunks"
@@ -104,19 +102,17 @@ def split_chunks(shared_folder, filename, file_sizes):
         while (chunk := file.read(512000)):  # Read up to 512KB
             chunk_filename = os.path.join(chunk_dir, f"{filename}_chunk_{chunk_index}.bin")
 
-            #hash chunk
+            # Hash chunk
             chunk_hash = hash_chunk_with_data(chunk)
+            chunk_hashes[chunk_index] = chunk_hash
 
             with open(chunk_filename, "wb") as chunk_file:
                 chunk_file.write(chunk)
 
-            chunk_hashes.append((chunk_hash, chunk_filename)) # Store hash and filename
-            print(f"Saved {len(chunk)} bytes to {chunk_filename}")
-
+            print(f"Saved {len(chunk)} bytes to {chunk_filename} (hash: {chunk_hash[:8]}...)")
             chunk_index += 1
 
     print(f"File {filename} split into {chunk_index} chunks.")
-
     return chunk_hashes
 
 #hashing provides integrity verification, ensuring that the file wasnt corrupted of tampered with during transmission
@@ -131,7 +127,7 @@ def hash_chunk(file_path):
     return sha256.hexdigest()
 
 def reassemble_file(original_filename, chunk_dir="./chunks", output_dir="./reassembled"):
-    """Reassembles split file chunks into the original file."""
+    """Reassembles split file chunks into the original file and verifies integrity."""
     
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
@@ -143,11 +139,12 @@ def reassemble_file(original_filename, chunk_dir="./chunks", output_dir="./reass
         print(f"No chunks found for {original_filename}.")
         return
     
-    # Sort chunk files by their index
+    # Sort chunk files by their index to ensure correct order
     chunk_files.sort(key=lambda x: int(x.split("_chunk_")[-1].split(".bin")[0]))  
 
     output_file = os.path.join(output_dir, original_filename)
     
+    # Combine all chunks into one file
     with open(output_file, "wb") as outfile:
         for chunk_file in chunk_files:
             chunk_path = os.path.join(chunk_dir, chunk_file)
@@ -156,7 +153,12 @@ def reassemble_file(original_filename, chunk_dir="./chunks", output_dir="./reass
             
             print(f"Reassembled {chunk_file} into {output_file}")
 
+    # Calculate hash of the reassembled file for verification
+    final_hash = hash_chunk(output_file)
+    print(f"Reassembled file hash: {final_hash}")
     print(f"\nReassembly complete: {output_file}")
+    
+    return final_hash
 
 
 # Get file sizes and store them in a dictionary
