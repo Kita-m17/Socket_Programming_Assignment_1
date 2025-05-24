@@ -8,15 +8,6 @@ trackerPort = 5000
 peerPort = 6000
 chunkSize = 1024 #1KB per chunk
 
-# #register files and their file chunks with the tracker
-# for file in files:
-#     file_size = os.path.getsize(file)
-#     num_chunks = file_size // chunkSize + (1 if file_size % chunkSize != 0 else 0)
-#     file_chunks[file] = num_chunks
-
-
-#     peerSocket.sendto(f"REGISTER {peerPort} {file}:{'-'.join(map(str, range(num_chunks)))}".encode(), (trackerIP, trackerPort))
-
 def get_file():
     currentPath = "./"
     path = os.listdir(currentPath)
